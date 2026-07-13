@@ -85,6 +85,7 @@ button { font-family: var(--sans); font-size: 12px; }
 
 /* main content */
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--chrome); }
+#room { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #roomhdr { padding: 6px 10px; font-weight: 700; font-size: 13px; color: var(--accent); border-bottom: 1px solid var(--chrome-dark); display: flex; align-items: center; gap: 10px; }
 #roomhdr .sub { font-weight: 400; font-size: 11px; color: var(--ink2); }
 #roomhdr .spacer { flex: 1; }
