@@ -33,7 +33,7 @@ defaults are proposals.
 games, servers, favorites, news. Apply on `arcade-data`:
 
 ```sh
-psql -h 10.0.1.32 -U openarcade -d openarcade -f db/schema.sql
+psql -h 10.0.1.45 -U openarcade -d openarcade -f db/schema.sql
 ```
 
 ## Exposure
