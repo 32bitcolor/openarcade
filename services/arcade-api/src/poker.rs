@@ -89,7 +89,7 @@ fn eval5(cards: &[Card; 5]) -> [u8; 6] {
     } else {
         cat = 0; tb.copy_from_slice(&ranks[..5]);
     }
-    [cat, tb[0], tb[1], tb[2], tb[3]]
+    [cat, tb[0], tb[1], tb[2], tb[3], tb[4]]
 }
 
 /// Best 5-card evaluation from 7 cards.

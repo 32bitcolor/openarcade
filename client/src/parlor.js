@@ -10,6 +10,7 @@ export const PARLOR_GAMES = [
   { key: "reversi", title: "Reversi (Othello)", ready: true },
   { key: "checkers", title: "Checkers", ready: true },
   { key: "chess", title: "Chess", ready: true },
+  { key: "poker", title: "Texas Hold'em Poker", ready: true },
 ];
 
 // ---- Reversi rules --------------------------------------------------------
