@@ -54,6 +54,7 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now arcade-api
+systemctl enable arcade-api >/dev/null 2>&1 || true
+systemctl restart arcade-api   # always restart so the freshly-built binary loads
 sleep 2
 systemctl is-active arcade-api && echo "arcade-api: running on :8080"
