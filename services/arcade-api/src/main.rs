@@ -13,11 +13,14 @@
 //!   GET  /ws                  -> client live channel (rooms/chat/members/moves)
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::net::UdpSocket;
+use tokio::time::timeout;
 
 use axum::{
     extract::{
@@ -95,7 +98,10 @@ async fn main() {
         tokio::spawn(async move {
             loop {
                 if let Err(e) = poll_once(&state).await {
-                    tracing::warn!("poll cycle failed: {e}");
+                    tracing::warn!("333networks poll failed: {e}");
+                }
+                if let Err(e) = poll_valve(&state).await {
+                    tracing::warn!("valve poll failed: {e}");
                 }
                 tokio::time::sleep(Duration::from_secs(poll_secs)).await;
             }
@@ -287,18 +293,242 @@ async fn ingest(
         });
     }
 
-    let key = format!("oa:servers:{gamename}");
-    let payload = serde_json::to_string(&out)?;
+    cache_servers(state, gamename, &out).await?;
+    Ok(out.len())
+}
+
+async fn cache_servers(
+    state: &AppState,
+    gamename: &str,
+    out: &[ServerOut],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let payload = serde_json::to_string(out)?;
     let mut redis = state.redis.clone();
     let _: () = redis::cmd("SET")
-        .arg(&key)
+        .arg(format!("oa:servers:{gamename}"))
         .arg(payload)
         .arg("EX")
         .arg(600)
         .query_async(&mut redis)
         .await?;
+    Ok(())
+}
 
-    Ok(out.len())
+// ===========================================================================
+// Valve ingester — GoldSrc/Source master + A2S (CS 1.6, TFC, DoD). No API key:
+// queries the public UDP master, then A2S_INFO each server for live details.
+// ===========================================================================
+const VALVE_MASTER: &str = "hl2master.steampowered.com:27011";
+const VALVE_CAP: usize = 500;
+
+fn valve_gamedir(gamename: &str) -> Option<&'static str> {
+    match gamename {
+        "cstrike" => Some("cstrike"),
+        "tfc" => Some("tfc"),
+        "dod" => Some("dod"),
+        _ => None,
+    }
+}
+
+async fn valve_master(
+    gamedir: &str,
+) -> Result<Vec<SocketAddrV4>, Box<dyn std::error::Error + Send + Sync>> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    sock.connect(VALVE_MASTER).await?;
+    let mut seed = String::from("0.0.0.0:0");
+    let mut out: Vec<SocketAddrV4> = Vec::new();
+
+    for _ in 0..30 {
+        let mut pkt: Vec<u8> = vec![0x31, 0xFF];
+        pkt.extend_from_slice(seed.as_bytes());
+        pkt.push(0);
+        pkt.extend_from_slice(format!("\\gamedir\\{gamedir}").as_bytes());
+        pkt.push(0);
+        sock.send(&pkt).await?;
+
+        let mut buf = [0u8; 4096];
+        let n = match timeout(Duration::from_secs(4), sock.recv(&mut buf)).await {
+            Ok(Ok(n)) => n,
+            _ => break,
+        };
+        if n < 6 {
+            break;
+        }
+        let mut ended = false;
+        let mut last: Option<SocketAddrV4> = None;
+        for chunk in buf[6..n].chunks(6) {
+            if chunk.len() < 6 {
+                break;
+            }
+            let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+            let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+            if ip.is_unspecified() && port == 0 {
+                ended = true;
+                break;
+            }
+            let sa = SocketAddrV4::new(ip, port);
+            out.push(sa);
+            last = Some(sa);
+        }
+        if ended || out.len() >= VALVE_CAP {
+            break;
+        }
+        match last {
+            Some(sa) => seed = format!("{}:{}", sa.ip(), sa.port()),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+struct A2sInfo {
+    name: Option<String>,
+    map: Option<String>,
+    players: Option<i32>,
+    max: Option<i32>,
+}
+
+fn read_cstr(buf: &[u8], pos: &mut usize) -> String {
+    let start = *pos;
+    while *pos < buf.len() && buf[*pos] != 0 {
+        *pos += 1;
+    }
+    let s = String::from_utf8_lossy(&buf[start..*pos]).to_string();
+    if *pos < buf.len() {
+        *pos += 1;
+    }
+    s
+}
+
+fn parse_a2s(buf: &[u8]) -> Option<A2sInfo> {
+    if buf.len() < 6 {
+        return None;
+    }
+    let typ = buf[4];
+    let mut pos = 5;
+    if typ == 0x49 {
+        // Source / modern GoldSrc
+        pos += 1; // protocol
+        let name = read_cstr(buf, &mut pos);
+        let map = read_cstr(buf, &mut pos);
+        let _folder = read_cstr(buf, &mut pos);
+        let _game = read_cstr(buf, &mut pos);
+        pos += 2; // appid
+        if pos + 1 >= buf.len() {
+            return None;
+        }
+        let players = buf[pos] as i32;
+        let max = buf[pos + 1] as i32;
+        Some(A2sInfo { name: Some(name), map: Some(map), players: Some(players), max: Some(max) })
+    } else if typ == 0x6D {
+        // legacy GoldSrc
+        let _addr = read_cstr(buf, &mut pos);
+        let name = read_cstr(buf, &mut pos);
+        let map = read_cstr(buf, &mut pos);
+        let _folder = read_cstr(buf, &mut pos);
+        let _game = read_cstr(buf, &mut pos);
+        if pos + 1 >= buf.len() {
+            return None;
+        }
+        let players = buf[pos] as i32;
+        let max = buf[pos + 1] as i32;
+        Some(A2sInfo { name: Some(name), map: Some(map), players: Some(players), max: Some(max) })
+    } else {
+        None
+    }
+}
+
+async fn a2s_info(addr: SocketAddrV4) -> Option<A2sInfo> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    sock.connect(addr).await.ok()?;
+    let mut req: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x54];
+    req.extend_from_slice(b"Source Engine Query\0");
+
+    for _ in 0..2 {
+        sock.send(&req).await.ok()?;
+        let mut buf = [0u8; 2048];
+        let n = timeout(Duration::from_secs(1), sock.recv(&mut buf)).await.ok()?.ok()?;
+        if n < 5 {
+            return None;
+        }
+        if buf[4] == 0x41 {
+            // challenge — append and retry once
+            if n >= 9 {
+                req = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x54];
+                req.extend_from_slice(b"Source Engine Query\0");
+                req.extend_from_slice(&buf[5..9]);
+                continue;
+            }
+            return None;
+        }
+        return parse_a2s(&buf[..n]);
+    }
+    None
+}
+
+async fn poll_valve(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = state.pool.get().await?;
+    let rows = client
+        .query("SELECT id, gamename FROM games WHERE query_proto = 'valve' AND supported", &[])
+        .await?;
+
+    for row in rows {
+        let game_id: i32 = row.get(0);
+        let gamename: String = row.get(1);
+        let gamedir = match valve_gamedir(&gamename) {
+            Some(g) => g,
+            None => continue,
+        };
+        let addrs = match valve_master(gamedir).await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("valve master {gamename}: {e}");
+                continue;
+            }
+        };
+        // A2S each server concurrently (bounded).
+        let details = futures::stream::iter(addrs.into_iter().map(|sa| async move {
+            (sa, a2s_info(sa).await)
+        }))
+        .buffer_unordered(64)
+        .collect::<Vec<_>>()
+        .await;
+
+        let mut out: Vec<ServerOut> = Vec::new();
+        for (sa, d) in details {
+            let info = match d {
+                Some(i) if i.name.is_some() => i,
+                _ => continue, // only keep servers that answered
+            };
+            let ip = IpAddr::V4(*sa.ip());
+            let port = sa.port() as i32;
+            client
+                .execute(
+                    "INSERT INTO servers
+                       (game_id, address, port, name, map, gametype, players, max_players, source, last_seen_at)
+                     VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,'valve', now())
+                     ON CONFLICT (game_id, address, port) DO UPDATE SET
+                       name=EXCLUDED.name, map=EXCLUDED.map,
+                       players=EXCLUDED.players, max_players=EXCLUDED.max_players,
+                       source=EXCLUDED.source, last_seen_at=now()",
+                    &[&game_id, &ip, &port, &info.name, &info.map, &info.players, &info.max],
+                )
+                .await?;
+            out.push(ServerOut {
+                address: sa.ip().to_string(),
+                port,
+                name: info.name,
+                map: info.map,
+                gametype: None,
+                players: info.players,
+                max_players: info.max,
+                source: "valve".into(),
+            });
+        }
+        cache_servers(state, &gamename, &out).await?;
+        tracing::info!("{gamename}: {} servers (valve)", out.len());
+    }
+    Ok(())
 }
 
 // ===========================================================================
