@@ -3,6 +3,7 @@
 -- Live server state lives in Redis; this table is the durable record + history.
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "citext";
 
 -- ---------------------------------------------------------------------------
 -- Accounts & social
