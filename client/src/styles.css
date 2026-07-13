@@ -145,6 +145,27 @@ tr.sel .col-addr { color: #dbe7fb; }
 
 .hidden { display: none !important; }
 
+/* context menu */
+#ctxmenu { position: fixed; z-index: 100; min-width: 170px; background: var(--panel); border: 1px solid var(--chrome-dark); box-shadow: 2px 2px 6px rgba(0,0,0,.35); padding: 3px; }
+#ctxmenu > div { padding: 5px 12px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+#ctxmenu > div:hover { background: var(--sel); color: #fff; }
+
+/* modal */
+#modal { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.4); display: grid; place-items: center; }
+.modal-box { position: relative; background: var(--chrome); border: 1px solid; border-color: var(--chrome-light) var(--chrome-dark) var(--chrome-dark) var(--chrome-light); padding: 16px 18px; min-width: 380px; max-width: 560px; max-height: 80vh; overflow: auto; box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+.modal-box h3 { margin: 0 0 4px; color: var(--accent); }
+.modal-x { position: absolute; top: 8px; right: 8px; cursor: pointer; border: 1px solid var(--chrome-dark); background: var(--chrome); width: 22px; height: 22px; }
+.modal-actions { margin-top: 14px; text-align: right; }
+.modal-actions button { padding: 5px 16px; cursor: pointer; }
+.cf-in { width: 100%; padding: 4px 6px; margin: 3px 0 12px; font-family: var(--mono); font-size: 12px; }
+.det-body { margin-top: 10px; }
+.det-none { color: var(--ink2); padding: 8px; font-style: italic; }
+.dettable { border-collapse: collapse; width: 100%; font-size: 12px; }
+.dettable th { text-align: left; padding: 4px 8px; border-bottom: 2px solid var(--chrome-dark); background: var(--chrome); }
+.dettable td { padding: 3px 8px; border-bottom: 1px solid #eee; }
+.dettable td.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.dettable tbody tr:nth-child(even) { background: #f6f8fb; }
+
 /* ---- parlor games ---- */
 #parlorwrap { flex: 1 1 60%; display: flex; flex-direction: column; min-height: 0; margin: 6px; overflow: auto; }
 #parlor-controls { padding: 6px 8px; background: var(--chrome); }

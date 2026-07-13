@@ -4,6 +4,7 @@
 // in place of the server browser.
 
 import { PARLOR_GAMES, createParlorSession } from "./parlor.js";
+import { invoke } from "@tauri-apps/api/core";
 
 const API = localStorage.getItem("oa_api") || "http://10.0.1.44:8080";
 const WS_URL = API.replace(/^http/, "ws") + "/ws";
@@ -35,6 +36,8 @@ async function init() {
   wireFilters();
   $("nick").addEventListener("click", changeNick);
   $("btn-refresh").addEventListener("click", () => state.current && loadServers(state.current));
+  document.addEventListener("click", () => $("ctxmenu").classList.add("hidden"));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { $("ctxmenu").classList.add("hidden"); closeModal(); } });
   await loadGames();
   connectWS();
   setInterval(loadGames, 60000); // refresh rail counts
@@ -231,6 +234,7 @@ function renderBrowser() {
       <td>${escapeHtml(s.gametype || "—")}</td>
       <td class="col-addr">${s.address}:${s.port}</td>`;
     tr.addEventListener("dblclick", () => joinServer(s));
+    tr.addEventListener("contextmenu", (e) => showContextMenu(s, e));
     tr.addEventListener("click", () => {
       body.querySelectorAll("tr.sel").forEach((x) => x.classList.remove("sel"));
       tr.classList.add("sel");
@@ -246,11 +250,119 @@ function setSort(key) {
   renderBrowser();
 }
 
-function joinServer(s) {
-  // Launch-and-join profiles land next; for now surface the connect target.
-  const line = `${s.name || "server"} — ${s.address}:${s.port}`;
-  sysLine(`Join requested: ${line}. (Launch-and-join profiles coming — this will boot the game and connect you.)`);
+// ---------------------------------------------------------------------------
+// Launch-and-join
+// ---------------------------------------------------------------------------
+// The app runs inside a distrobox, so launches route through the host via
+// distrobox-host-exec. Steam GoldSrc/Source games connect via steam://.
+const LAUNCH_DEFAULTS = {
+  cstrike: { program: "distrobox-host-exec", args: "xdg-open steam://connect/{addr}" },
+  tfc: { program: "distrobox-host-exec", args: "xdg-open steam://connect/{addr}" },
+  dod: { program: "distrobox-host-exec", args: "xdg-open steam://connect/{addr}" },
+};
+function getLaunchProfile(game) {
+  const saved = localStorage.getItem("oa_launch_" + game);
+  if (saved) { try { return JSON.parse(saved); } catch { /* ignore */ } }
+  return LAUNCH_DEFAULTS[game] || null;
 }
+
+async function joinServer(s) {
+  const game = state.current;
+  const prof = getLaunchProfile(game);
+  if (!prof) { configLaunch(game); return; }
+  const addr = `${s.address}:${s.port}`;
+  const argstr = prof.args.replace(/\{addr\}/g, addr).replace(/\{ip\}/g, s.address).replace(/\{port\}/g, s.port);
+  const args = argstr.split(/\s+/).filter(Boolean);
+  try {
+    await invoke("launch", { program: prof.program, args });
+    sysLine(`Launching ${game} → ${addr}…`);
+  } catch (e) {
+    sysLine(`Launch failed (${e}). Right-click → Configure Launch to fix the command.`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Right-click context menu
+// ---------------------------------------------------------------------------
+function showContextMenu(s, ev) {
+  ev.preventDefault();
+  const menu = $("ctxmenu");
+  menu.innerHTML = `
+    <div data-act="join">▶ Join &amp; Play</div>
+    <div data-act="details">🔍 Server Details</div>
+    <div data-act="config">⚙ Configure Launch…</div>
+    <div data-act="copy">📋 Copy Address</div>`;
+  menu.style.left = Math.min(ev.clientX, window.innerWidth - 180) + "px";
+  menu.style.top = Math.min(ev.clientY, window.innerHeight - 130) + "px";
+  menu.classList.remove("hidden");
+  menu.querySelectorAll("[data-act]").forEach((el) =>
+    el.addEventListener("click", () => {
+      menu.classList.add("hidden");
+      const a = el.dataset.act;
+      if (a === "join") joinServer(s);
+      else if (a === "details") showDetails(s);
+      else if (a === "config") configLaunch(state.current);
+      else if (a === "copy") { navigator.clipboard?.writeText(`${s.address}:${s.port}`); sysLine(`Copied ${s.address}:${s.port}`); }
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Server details (live player query)
+// ---------------------------------------------------------------------------
+async function showDetails(s) {
+  openModal(`<h3>${escapeHtml(s.name || "Server")}</h3>
+    <div class="col-addr">${s.address}:${s.port} · ${escapeHtml(s.map || "")}</div>
+    <div id="det-body" class="det-body">Querying server…</div>`);
+  try {
+    const r = await fetch(`${API}/details?game=${encodeURIComponent(state.current)}&addr=${s.address}&port=${s.port}`);
+    const d = await r.json();
+    const players = d.players || [];
+    const rows = players.length
+      ? players.map((p) => `<tr><td>${escapeHtml(p.name || "")}</td><td class="num">${p.score ?? "—"}</td><td class="num">${p.ping ?? "—"}</td><td class="num">${p.time != null ? fmtTime(p.time) : "—"}</td></tr>`).join("")
+      : `<tr><td colspan="4" class="det-none">No player list returned (the server hides it or didn't answer the query).</td></tr>`;
+    const body = $("det-body");
+    if (body) body.innerHTML = `<table class="dettable"><thead><tr><th>Player</th><th>Score</th><th>Ping</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) {
+    const body = $("det-body");
+    if (body) body.textContent = "Failed to query the server.";
+  }
+}
+function fmtTime(sec) {
+  sec = Math.floor(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), ss = sec % 60;
+  return h ? `${h}h${m}m` : `${m}m${ss}s`;
+}
+
+// ---------------------------------------------------------------------------
+// Configure launch
+// ---------------------------------------------------------------------------
+function configLaunch(game) {
+  const prof = getLaunchProfile(game) || { program: "distrobox-host-exec", args: "xdg-open steam://connect/{addr}" };
+  openModal(`<h3>Configure Launch — ${escapeHtml(game)}</h3>
+    <p class="hint">Command that boots the game and connects. Placeholders: <b>{addr}</b> (ip:port), <b>{ip}</b>, <b>{port}</b>.
+    Runs on your host via <span class="mono">distrobox-host-exec</span>.</p>
+    <label>Program<br><input id="cf-prog" class="cf-in" value="${escapeHtml(prof.program)}"></label>
+    <label>Arguments<br><input id="cf-args" class="cf-in" value="${escapeHtml(prof.args)}"></label>
+    <div class="modal-actions"><button id="cf-save">Save</button></div>`);
+  $("cf-save").addEventListener("click", () => {
+    const program = $("cf-prog").value.trim();
+    const args = $("cf-args").value.trim();
+    if (program) { localStorage.setItem("oa_launch_" + game, JSON.stringify({ program, args })); sysLine(`Saved launch config for ${game}.`); }
+    closeModal();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Modal
+// ---------------------------------------------------------------------------
+function openModal(html) {
+  const m = $("modal");
+  m.innerHTML = `<div class="modal-box">${html}<button class="modal-x" id="modal-x">✕</button></div>`;
+  m.classList.remove("hidden");
+  $("modal-x").addEventListener("click", closeModal);
+  m.addEventListener("mousedown", (e) => { if (e.target === m) closeModal(); });
+}
+function closeModal() { const m = $("modal"); m.classList.add("hidden"); m.innerHTML = ""; }
 
 // ---------------------------------------------------------------------------
 // Chat + members (WebSocket)
