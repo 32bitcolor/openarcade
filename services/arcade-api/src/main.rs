@@ -108,7 +108,7 @@ async fn main() {
 // query_proto encodes the fetch source: '333networks' is polled live now;
 // 'openspy' titles are known/seeded and light up once the gslist sidecar lands.
 // ---------------------------------------------------------------------------
-async fn seed_games(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
+async fn seed_games(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     const SEED: &[(&str, &str, &str)] = &[
         // gamename, title, source(query_proto)
         ("ut", "Unreal Tournament", "333networks"),
@@ -181,7 +181,7 @@ fn clean(s: Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-async fn poll_once(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
+async fn poll_once(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = state.pool.get().await?;
     let rows = client
         .query(
@@ -212,7 +212,7 @@ async fn poll_once(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
 async fn fetch_333(
     http: &reqwest::Client,
     gamename: &str,
-) -> Result<Vec<T333Server>, Box<dyn std::error::Error>> {
+) -> Result<Vec<T333Server>, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("https://master.333networks.com/json/{gamename}?r=1000");
     let body: serde_json::Value = http
         .get(&url)
@@ -236,7 +236,7 @@ async fn ingest(
     game_id: i32,
     gamename: &str,
     list: Vec<T333Server>,
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let client = state.pool.get().await?;
     let mut out: Vec<ServerOut> = Vec::with_capacity(list.len());
 
