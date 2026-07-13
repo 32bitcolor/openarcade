@@ -329,11 +329,13 @@ async fn cache_servers(
 // free key (https://steamcommunity.com/dev/apikey) in STEAM_API_KEY. Without a
 // key the valve games simply stay empty until it's set.
 // ===========================================================================
-fn valve_gamedir(gamename: &str) -> Option<&'static str> {
+// Filter by Steam appid, not gamedir — the GoldSrc and Source games share
+// gamedir names (cstrike, dod), so gamedir alone leaks the Source versions.
+fn valve_appid(gamename: &str) -> Option<u32> {
     match gamename {
-        "cstrike" => Some("cstrike"),
-        "tfc" => Some("tfc"),
-        "dod" => Some("dod"),
+        "cstrike" => Some(10), // Counter-Strike 1.6
+        "tfc" => Some(20),     // Team Fortress Classic
+        "dod" => Some(30),     // Day of Defeat
         _ => None,
     }
 }
@@ -370,8 +372,8 @@ async fn poll_valve(state: &AppState) -> Result<(), Box<dyn std::error::Error + 
     for row in rows {
         let game_id: i32 = row.get(0);
         let gamename: String = row.get(1);
-        let gamedir = match valve_gamedir(&gamename) {
-            Some(g) => g,
+        let appid = match valve_appid(&gamename) {
+            Some(a) => a,
             None => continue,
         };
 
@@ -380,7 +382,7 @@ async fn poll_valve(state: &AppState) -> Result<(), Box<dyn std::error::Error + 
             .get("https://api.steampowered.com/IGameServersService/GetServerList/v1/")
             .query(&[
                 ("key", key.as_str()),
-                ("filter", &format!("\\gamedir\\{gamedir}")),
+                ("filter", &format!("\\appid\\{appid}")),
                 ("limit", "1000"),
             ])
             .timeout(Duration::from_secs(20))
