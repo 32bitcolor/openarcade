@@ -13,11 +13,14 @@
 //!   GET  /ws                  -> client live channel (rooms/chat/members/moves)
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::net::UdpSocket;
+use tokio::time::timeout;
 
 use axum::{
     extract::{
@@ -99,6 +102,9 @@ async fn main() {
                 }
                 if let Err(e) = poll_valve(&state).await {
                     tracing::warn!("valve poll failed: {e}");
+                }
+                if let Err(e) = poll_quake(&state).await {
+                    tracing::warn!("quake poll failed: {e}");
                 }
                 tokio::time::sleep(Duration::from_secs(poll_secs)).await;
             }
@@ -422,6 +428,195 @@ async fn poll_valve(state: &AppState) -> Result<(), Box<dyn std::error::Error + 
         }
         cache_servers(state, &gamename, &out).await?;
         tracing::info!("{gamename}: {} servers (valve)", out.len());
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// QuakeWorld ingester (Quake 1 MP) — the community hub JSON API (no key).
+// ===========================================================================
+async fn poll_quakeworld(
+    state: &AppState,
+    game_id: i32,
+    gamename: &str,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let body: Value = state
+        .http
+        .get("https://hubapi.quakeworld.nu/v2/servers")
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let list = body.as_array().cloned().unwrap_or_default();
+    let client = state.pool.get().await?;
+    let mut out: Vec<ServerOut> = Vec::new();
+    for v in list {
+        let addr = v["address"].as_str().unwrap_or("");
+        let (ip_str, port) = match addr.rsplit_once(':') {
+            Some((i, p)) => (i.to_string(), p.parse::<i32>().unwrap_or(0)),
+            None => continue,
+        };
+        let ip: IpAddr = match ip_str.parse() {
+            Ok(ip) => ip,
+            Err(_) => continue,
+        };
+        let s = &v["settings"];
+        let name = clean(s["hostname"].as_str().map(|x| x.to_string()));
+        let map = clean(s["map"].as_str().map(|x| x.to_string()));
+        let players = v["clients"].as_array().map(|a| a.len() as i32);
+        let max_players = s["maxclients"].as_str().and_then(|x| x.parse::<i32>().ok());
+        upsert_server(&client, game_id, ip, port, &name, &map, &None, players, max_players, "quakeworld").await?;
+        out.push(ServerOut { address: ip_str, port, name, map, gametype: None, players, max_players, source: "quakeworld".into() });
+    }
+    cache_servers(state, gamename, &out).await?;
+    Ok(out.len())
+}
+
+// ===========================================================================
+// Quake III Arena ingester — id master getservers + per-server getstatus (UDP).
+// ===========================================================================
+const Q3_MASTER: &str = "master.ioquake3.org";
+
+async fn q3_getservers(master: &str) -> Result<Vec<SocketAddrV4>, Box<dyn std::error::Error + Send + Sync>> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    sock.connect((master, 27950)).await?;
+    sock.send(b"\xff\xff\xff\xffgetservers 68 empty full\0").await?;
+    let mut all: Vec<SocketAddrV4> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match timeout(Duration::from_secs(3), sock.recv(&mut buf)).await {
+            Ok(Ok(n)) => n,
+            _ => break,
+        };
+        let data = &buf[..n];
+        // entries begin after "getserversResponse"; each is '\' + 4-byte ip + 2-byte port
+        let start = data.windows(18).position(|w| w == b"getserversResponse").map(|p| p + 18).unwrap_or(0);
+        let mut j = start;
+        let mut eot = false;
+        while j + 7 <= n {
+            if data[j] == b'\\' {
+                if &data[j + 1..j + 4] == b"EOT" { eot = true; break; }
+                let ip = Ipv4Addr::new(data[j + 1], data[j + 2], data[j + 3], data[j + 4]);
+                let port = u16::from_be_bytes([data[j + 5], data[j + 6]]);
+                if port != 0 { all.push(SocketAddrV4::new(ip, port)); }
+                j += 7;
+            } else {
+                j += 1;
+            }
+        }
+        if eot || all.len() > 2000 { break; }
+    }
+    Ok(all)
+}
+
+async fn q3_getstatus(addr: SocketAddrV4) -> Option<A2sInfo> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    sock.connect(addr).await.ok()?;
+    sock.send(b"\xff\xff\xff\xffgetstatus\0").await.ok()?;
+    let mut buf = [0u8; 4096];
+    let n = timeout(Duration::from_secs(1), sock.recv(&mut buf)).await.ok()?.ok()?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let idx = text.find("statusResponse")?;
+    let rest = text[idx + "statusResponse".len()..].trim_start_matches(['\n', '\r']);
+    let mut lines = rest.split('\n');
+    let info = lines.next()?;
+    let mut kv = HashMap::new();
+    let parts: Vec<&str> = info.trim_start_matches('\\').split('\\').collect();
+    let mut it = parts.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        kv.insert(k.to_string(), v.to_string());
+    }
+    let players = lines.filter(|l| !l.trim().is_empty()).count() as i32;
+    Some(A2sInfo {
+        name: kv.get("sv_hostname").cloned(),
+        map: kv.get("mapname").cloned(),
+        players: Some(players),
+        max: kv.get("sv_maxclients").and_then(|s| s.parse::<i32>().ok()),
+    })
+}
+
+async fn poll_quake3(
+    state: &AppState,
+    game_id: i32,
+    gamename: &str,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let addrs = q3_getservers(Q3_MASTER).await?;
+    let details = futures::stream::iter(addrs.into_iter().map(|sa| async move { (sa, q3_getstatus(sa).await) }))
+        .buffer_unordered(64)
+        .collect::<Vec<_>>()
+        .await;
+    let client = state.pool.get().await?;
+    let mut out: Vec<ServerOut> = Vec::new();
+    for (sa, d) in details {
+        let info = match d {
+            Some(i) if i.name.is_some() => i,
+            _ => continue,
+        };
+        let ip = IpAddr::V4(*sa.ip());
+        let port = sa.port() as i32;
+        let name = clean(info.name);
+        let map = clean(info.map);
+        upsert_server(&client, game_id, ip, port, &name, &map, &None, info.players, info.max, "quake3").await?;
+        out.push(ServerOut { address: sa.ip().to_string(), port, name, map, gametype: None, players: info.players, max_players: info.max, source: "quake3".into() });
+    }
+    cache_servers(state, gamename, &out).await?;
+    Ok(out.len())
+}
+
+struct A2sInfo {
+    name: Option<String>,
+    map: Option<String>,
+    players: Option<i32>,
+    max: Option<i32>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upsert_server(
+    client: &deadpool_postgres::Client,
+    game_id: i32,
+    ip: IpAddr,
+    port: i32,
+    name: &Option<String>,
+    map: &Option<String>,
+    gametype: &Option<String>,
+    players: Option<i32>,
+    max_players: Option<i32>,
+    source: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    client
+        .execute(
+            "INSERT INTO servers
+               (game_id, address, port, name, map, gametype, players, max_players, source, last_seen_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+             ON CONFLICT (game_id, address, port) DO UPDATE SET
+               name=EXCLUDED.name, map=EXCLUDED.map, gametype=EXCLUDED.gametype,
+               players=EXCLUDED.players, max_players=EXCLUDED.max_players,
+               source=EXCLUDED.source, last_seen_at=now()",
+            &[&game_id, &ip, &port, name, map, gametype, &players, &max_players, &source],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn poll_quake(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = state.pool.get().await?;
+    let rows = client
+        .query("SELECT id, gamename, query_proto FROM games WHERE query_proto IN ('quake','quake3') AND supported", &[])
+        .await?;
+    for row in rows {
+        let game_id: i32 = row.get(0);
+        let gamename: String = row.get(1);
+        let proto: String = row.get(2);
+        let res = if proto == "quake3" {
+            poll_quake3(state, game_id, &gamename).await
+        } else {
+            poll_quakeworld(state, game_id, &gamename).await
+        };
+        match res {
+            Ok(n) => tracing::info!("{gamename}: {n} servers ({proto})"),
+            Err(e) => tracing::warn!("{gamename} ({proto}) failed: {e}"),
+        }
     }
     Ok(())
 }
