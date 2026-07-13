@@ -1,0 +1,62 @@
+:root {
+  --bg: #0d1216;
+  --panel: #161f26;
+  --line: #243440;
+  --ink: #e7eef2;
+  --ink2: #a7b8c3;
+  --amber: #f7941e;
+  --cyan: #37c6e0;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+}
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+#tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--ink2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+
+.tab:hover { color: var(--ink); }
+
+.tab.active {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 40%, transparent);
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+}
+
+#view {
+  flex: 1;
+  padding: 24px;
+  overflow: auto;
+}
+
+.status {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--cyan);
+}

@@ -1,0 +1,20 @@
+[package]
+name = "openarcade"
+version = "0.0.1"
+description = "OpenArcade desktop client"
+authors = ["Austin Funk (32bitcolor)"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# by default Tauri runs in production mode; devtools is enabled during `tauri dev`
+custom-protocol = ["tauri/custom-protocol"]

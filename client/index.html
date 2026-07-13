@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenArcade</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <nav id="tabs" aria-label="Sections">
+        <button class="tab active" data-tab="games">My Games</button>
+        <button class="tab" data-tab="browser">Server Browser</button>
+        <button class="tab" data-tab="rooms">Rooms</button>
+        <button class="tab" data-tab="buddies">Buddies</button>
+        <button class="tab" data-tab="downloads">Downloads</button>
+        <button class="tab" data-tab="news">News</button>
+      </nav>
+      <main id="view">
+        <p class="status" id="status">Connecting to arcade-api…</p>
+      </main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,28 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+
+# Node
+node_modules
+dist
+dist-ssr
+.pnpm-store
+*.log
+npm-debug.log*
+
+# Tauri
+client/src-tauri/target
+client/src-tauri/gen
+
+# Env / secrets — never commit real creds
+.env
+.env.local
+infra/lxc/secrets.env
+
+# Editor / OS
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+*.swp
