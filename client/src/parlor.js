@@ -9,7 +9,7 @@
 export const PARLOR_GAMES = [
   { key: "reversi", title: "Reversi (Othello)", ready: true },
   { key: "checkers", title: "Checkers", ready: true },
-  { key: "chess", title: "Chess", ready: false },
+  { key: "chess", title: "Chess", ready: true },
 ];
 
 // ---- Reversi rules --------------------------------------------------------
@@ -55,6 +55,7 @@ export function createParlorSession(gameKey, root, controls, io) {
     return { handle() {}, destroy() {} };
   }
   if (gameKey === "checkers") return checkersSession(root, controls, io);
+  if (gameKey === "chess") return chessSession(root, controls, io);
   return reversiSession(root, controls, io);
 }
 
@@ -378,8 +379,297 @@ function checkersSession(root, controls, { send, getNick }) {
   return { handle, destroy() { root.innerHTML = ""; controls.innerHTML = ""; } };
 }
 
+// ---- Chess rules ----------------------------------------------------------
+// Board: index 0..63, row 0 = rank 8 (black back rank), row 7 = white back rank.
+// Pieces: uppercase = White (PNBRQK), lowercase = black. "" = empty.
+const CW = "w", CB2 = "b";
+const pcColor = (p) => (p === "" ? null : p === p.toUpperCase() ? CW : CB2);
+const other = (c) => (c === CW ? CB2 : CW);
+const rc = (i) => [Math.floor(i / 8), i % 8];
+const inb = (r, c) => r >= 0 && r < 8 && c >= 0 && c < 8;
+
+function chInit() {
+  const back = "rnbqkbnr";
+  const b = new Array(64).fill("");
+  for (let c = 0; c < 8; c++) {
+    b[c] = back[c];
+    b[8 + c] = "p";
+    b[48 + c] = "P";
+    b[56 + c] = back[c].toUpperCase();
+  }
+  return { board: b, turn: CW, castle: { K: true, Q: true, k: true, q: true }, ep: -1, result: null };
+}
+
+const KN = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+const KG = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+const DIAG = [[-1,-1],[-1,1],[1,-1],[1,1]];
+const ORTH = [[-1,0],[1,0],[0,-1],[0,1]];
+
+function isAttacked(board, idx, by) {
+  const [r, c] = rc(idx);
+  // pawns
+  const pd = by === CW ? 1 : -1; // white pawns sit below (higher row); attack upward
+  for (const dc of [-1, 1]) {
+    const rr = r + pd, cc = c + dc;
+    if (inb(rr, cc)) {
+      const p = board[rr * 8 + cc];
+      if (p && pcColor(p) === by && p.toLowerCase() === "p") return true;
+    }
+  }
+  for (const [dr, dc] of KN) {
+    const rr = r + dr, cc = c + dc;
+    if (inb(rr, cc)) { const p = board[rr * 8 + cc]; if (p && pcColor(p) === by && p.toLowerCase() === "n") return true; }
+  }
+  for (const [dr, dc] of KG) {
+    const rr = r + dr, cc = c + dc;
+    if (inb(rr, cc)) { const p = board[rr * 8 + cc]; if (p && pcColor(p) === by && p.toLowerCase() === "k") return true; }
+  }
+  const ray = (dirs, types) => {
+    for (const [dr, dc] of dirs) {
+      let rr = r + dr, cc = c + dc;
+      while (inb(rr, cc)) {
+        const p = board[rr * 8 + cc];
+        if (p) { if (pcColor(p) === by && types.includes(p.toLowerCase())) return true; break; }
+        rr += dr; cc += dc;
+      }
+    }
+    return false;
+  };
+  if (ray(DIAG, ["b", "q"])) return true;
+  if (ray(ORTH, ["r", "q"])) return true;
+  return false;
+}
+
+function kingIdx(board, color) {
+  const k = color === CW ? "K" : "k";
+  return board.indexOf(k);
+}
+function inCheck(board, color) {
+  return isAttacked(board, kingIdx(board, color), other(color));
+}
+
+// Apply a (validated-enough) move to a state, returning a new state WITHOUT
+// switching turn — used both for legality testing and real application.
+function chApply(state, m) {
+  const b = state.board.slice();
+  const p = b[m.from];
+  const color = pcColor(p);
+  const [fr, fc] = rc(m.from), [tr, tc] = rc(m.to);
+  const castle = { ...state.castle };
+  let ep = -1;
+  const low = p.toLowerCase();
+
+  // en passant capture
+  if (low === "p" && m.to === state.ep && b[m.to] === "") {
+    b[(fr) * 8 + tc] = ""; // captured pawn sits on the from-rank, to-file
+  }
+  b[m.to] = p;
+  b[m.from] = "";
+  // promotion
+  if (low === "p" && (tr === 0 || tr === 7)) {
+    const pr = (m.promo || "q");
+    b[m.to] = color === CW ? pr.toUpperCase() : pr.toLowerCase();
+  }
+  // double pawn push sets ep target
+  if (low === "p" && Math.abs(tr - fr) === 2) ep = (fr + tr) / 2 * 8 + fc;
+  // castling: move the rook
+  if (low === "k" && Math.abs(tc - fc) === 2) {
+    if (tc === 6) { b[tr * 8 + 5] = b[tr * 8 + 7]; b[tr * 8 + 7] = ""; }
+    else if (tc === 2) { b[tr * 8 + 3] = b[tr * 8 + 0]; b[tr * 8 + 0] = ""; }
+  }
+  // update castling rights
+  if (p === "K") { castle.K = false; castle.Q = false; }
+  if (p === "k") { castle.k = false; castle.q = false; }
+  if (m.from === 63 || m.to === 63) castle.K = false;
+  if (m.from === 56 || m.to === 56) castle.Q = false;
+  if (m.from === 7 || m.to === 7) castle.k = false;
+  if (m.from === 0 || m.to === 0) castle.q = false;
+
+  return { board: b, turn: state.turn, castle, ep, result: null };
+}
+
+function genPseudo(state, i, out) {
+  const b = state.board, p = b[i], color = pcColor(p), [r, c] = rc(i);
+  const low = p.toLowerCase();
+  const add = (tr, tc, extra) => { if (inb(tr, tc)) { const t = b[tr * 8 + tc]; if (!t || pcColor(t) !== color) out.push({ from: i, to: tr * 8 + tc, ...extra }); } };
+  const addEmptyOnly = (tr, tc) => inb(tr, tc) && b[tr * 8 + tc] === "";
+
+  if (low === "p") {
+    const dir = color === CW ? -1 : 1;
+    const startRow = color === CW ? 6 : 1;
+    const promoRow = color === CW ? 0 : 7;
+    // forward
+    if (addEmptyOnly(r + dir, c)) {
+      pushPawn(out, i, (r + dir) * 8 + c, r + dir === promoRow);
+      if (r === startRow && addEmptyOnly(r + 2 * dir, c)) out.push({ from: i, to: (r + 2 * dir) * 8 + c });
+    }
+    // captures
+    for (const dc of [-1, 1]) {
+      const tr = r + dir, tc = c + dc;
+      if (inb(tr, tc)) {
+        const t = b[tr * 8 + tc];
+        if ((t && pcColor(t) !== color) || tr * 8 + tc === state.ep) pushPawn(out, i, tr * 8 + tc, tr === promoRow);
+      }
+    }
+  } else if (low === "n") {
+    for (const [dr, dc] of KN) add(r + dr, c + dc);
+  } else if (low === "k") {
+    for (const [dr, dc] of KG) add(r + dr, c + dc);
+    // castling
+    const row = color === CW ? 7 : 0;
+    if (i === row * 8 + 4 && !inCheck(b, color)) {
+      const kingSide = color === CW ? state.castle.K : state.castle.k;
+      const queenSide = color === CW ? state.castle.Q : state.castle.q;
+      if (kingSide && b[row * 8 + 5] === "" && b[row * 8 + 6] === "" && b[row * 8 + 7]?.toLowerCase() === "r" &&
+          !isAttacked(b, row * 8 + 5, other(color)) && !isAttacked(b, row * 8 + 6, other(color)))
+        out.push({ from: i, to: row * 8 + 6 });
+      if (queenSide && b[row * 8 + 3] === "" && b[row * 8 + 2] === "" && b[row * 8 + 1] === "" && b[row * 8 + 0]?.toLowerCase() === "r" &&
+          !isAttacked(b, row * 8 + 3, other(color)) && !isAttacked(b, row * 8 + 2, other(color)))
+        out.push({ from: i, to: row * 8 + 2 });
+    }
+  } else {
+    const dirs = low === "b" ? DIAG : low === "r" ? ORTH : DIAG.concat(ORTH);
+    for (const [dr, dc] of dirs) {
+      let rr = r + dr, cc = c + dc;
+      while (inb(rr, cc)) {
+        const t = b[rr * 8 + cc];
+        if (!t) out.push({ from: i, to: rr * 8 + cc });
+        else { if (pcColor(t) !== color) out.push({ from: i, to: rr * 8 + cc }); break; }
+        rr += dr; cc += dc;
+      }
+    }
+  }
+}
+function pushPawn(out, from, to, promo) {
+  if (promo) for (const pr of ["q", "r", "b", "n"]) out.push({ from, to, promo: pr });
+  else out.push({ from, to });
+}
+
+function chLegal(state) {
+  const out = [];
+  for (let i = 0; i < 64; i++) if (pcColor(state.board[i]) === state.turn) genPseudo(state, i, out);
+  return out.filter((m) => !inCheck(chApply(state, m).board, state.turn));
+}
+
+function chMove(state, m) {
+  const legal = chLegal(state).find((x) => x.from === m.from && x.to === m.to && (x.promo || "q") === (m.promo || "q"));
+  if (!legal) return null;
+  const ns = chApply(state, legal);
+  ns.turn = other(state.turn);
+  const opp = ns.turn;
+  if (chLegal(ns).length === 0) ns.result = inCheck(ns.board, opp) ? other(opp) : "draw"; // mate or stalemate
+  return ns;
+}
+
+// ---- Chess session --------------------------------------------------------
+const GLYPH = { K: "♔", Q: "♕", R: "♖", B: "♗", N: "♘", P: "♙", k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
+
+function chessSession(root, controls, { send, getNick }) {
+  let needSync = true;
+  let st = chInit();
+  st.seats = { 1: null, 2: null }; // 1 = White, 2 = black
+  let sel = null;
+
+  const myNick = () => getNick();
+  const seatColor = () => (st.seats[1] === myNick() ? CW : st.seats[2] === myNick() ? CB2 : null);
+  const seatOf = (c) => (c === CW ? 1 : 2);
+
+  function onCell(i) {
+    if (st.result || seatColor() !== st.turn) return;
+    if (sel === null) {
+      if (pcColor(st.board[i]) === st.turn) { sel = i; render(); }
+      return;
+    }
+    if (i === sel) { sel = null; render(); return; }
+    if (pcColor(st.board[i]) === st.turn) { sel = i; render(); return; }
+    // attempt move sel -> i
+    const moves = chLegal(st).filter((m) => m.from === sel && m.to === i);
+    if (!moves.length) return;
+    let promo;
+    if (moves.length > 1 && moves[0].promo) {
+      const ch = (prompt("Promote to (q,r,b,n):", "q") || "q").toLowerCase();
+      promo = ["q", "r", "b", "n"].includes(ch) ? ch : "q";
+    }
+    send({ a: "move", from: sel, to: i, promo });
+    sel = null;
+  }
+
+  function handle(g, from) {
+    if (!g || typeof g !== "object") return;
+    switch (g.a) {
+      case "sit": {
+        const s = g.color === 2 ? 2 : 1;
+        if (!st.seats[s] && st.seats[s === 1 ? 2 : 1] !== from) st.seats[s] = from;
+        break;
+      }
+      case "stand": if (st.seats[g.color] === from) st.seats[g.color] = null; break;
+      case "reset": { const seats = st.seats; st = chInit(); st.seats = seats; sel = null; break; }
+      case "move": {
+        if (st.result) break;
+        if (from !== st.seats[seatOf(st.turn)]) break;
+        const ns = chMove(st, { from: g.from, to: g.to, promo: g.promo });
+        if (!ns) break;
+        ns.seats = st.seats;
+        st = ns;
+        break;
+      }
+      case "sync_req": if (seatColor()) send({ a: "state", st: JSON.parse(JSON.stringify(st)) }); break;
+      case "state": if (needSync && g.st) { st = g.st; needSync = false; } break;
+    }
+    render();
+  }
+
+  function render() {
+    const nm = (c) => st.seats[seatOf(c)] || "(open)";
+    let status;
+    if (st.result === "draw") status = "Draw.";
+    else if (st.result) status = `${st.result === CW ? "White" : "Black"} wins — checkmate!`;
+    else status = `${st.turn === CW ? "White" : "Black"} to move${inCheck(st.board, st.turn) ? " — check!" : ""}`;
+
+    controls.innerHTML = `
+      <div class="parlor-status">${status}</div>
+      <div class="parlor-seats">
+        <span class="seat w">♔ White: <b>${escapeHtml(nm(CW))}</b> ${seatBtn(CW)}</span>
+        <span class="seat b">♚ Black: <b>${escapeHtml(nm(CB2))}</b> ${seatBtn(CB2)}</span>
+        <button class="fbtn" data-act="reset">New game</button>
+      </div>`;
+    controls.querySelectorAll("[data-sit]").forEach((el) => el.addEventListener("click", () => send({ a: "sit", color: Number(el.dataset.sit) })));
+    controls.querySelectorAll("[data-stand]").forEach((el) => el.addEventListener("click", () => send({ a: "stand", color: Number(el.dataset.stand) })));
+    const rb = controls.querySelector('[data-act="reset"]');
+    if (rb) rb.addEventListener("click", () => send({ a: "reset" }));
+
+    const targets = new Set();
+    if (sel !== null) chLegal(st).filter((m) => m.from === sel).forEach((m) => targets.add(m.to));
+
+    let html = '<div class="chess">';
+    for (let i = 0; i < 64; i++) {
+      const [r, c] = rc(i);
+      const dark = (r + c) % 2 === 1;
+      const p = st.board[i];
+      const t = targets.has(i) ? " tgt" : "";
+      const s = i === sel ? " selp" : "";
+      html += `<div class="csq2 ${dark ? "d" : "l"}${t}${s}" data-i="${i}">${p ? `<span class="cpc ${pcColor(p) === CW ? "wp" : "bp"}">${GLYPH[p]}</span>` : ""}</div>`;
+    }
+    html += "</div>";
+    root.innerHTML = html;
+    root.querySelectorAll(".csq2").forEach((el) => el.addEventListener("click", () => onCell(Number(el.dataset.i))));
+  }
+
+  function seatBtn(color) {
+    const s = seatOf(color);
+    if (st.seats[s] === myNick()) return `<button class="minibtn" data-stand="${s}">stand</button>`;
+    if (!st.seats[s] && !seatColor()) return `<button class="minibtn" data-sit="${s}">sit</button>`;
+    return "";
+  }
+
+  send({ a: "sync_req" });
+  render();
+  return { handle, destroy() { root.innerHTML = ""; controls.innerHTML = ""; } };
+}
+
 // Exposed for tests (rule functions are pure).
 export const _ck = { ckInit, applyPath, jumpsFrom, simpleFrom, hasJump, ckWinner, P, colorOf };
+export const _chess = { chInit, chLegal, chMove, inCheck, isAttacked, pcColor };
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
