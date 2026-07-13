@@ -33,6 +33,9 @@ ARCADE_API_ADDR=0.0.0.0:8080
 DATABASE_URL=${DATABASE_URL}
 REDIS_URL=${REDIS_URL}
 POLL_INTERVAL_SECS=${POLL_INTERVAL_SECS:-120}
+# Optional: free key from https://steamcommunity.com/dev/apikey — lights up
+# the Valve games (CS 1.6 / TFC / DoD). Empty = those games stay dark.
+STEAM_API_KEY=${STEAM_API_KEY:-}
 ENV
 fi
 
