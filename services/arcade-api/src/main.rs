@@ -571,6 +571,71 @@ struct A2sInfo {
     max: Option<i32>,
 }
 
+// ===========================================================================
+// Quake II ingester — q2servers.com raw list + per-server Q2 status query.
+// ===========================================================================
+async fn q2_status(addr: SocketAddrV4) -> Option<A2sInfo> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    sock.connect(addr).await.ok()?;
+    sock.send(b"\xff\xff\xff\xffstatus\0").await.ok()?;
+    let mut buf = [0u8; 4096];
+    let n = timeout(Duration::from_secs(1), sock.recv(&mut buf)).await.ok()?.ok()?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let idx = text.find("print")?;
+    let rest = text[idx + "print".len()..].trim_start_matches(['\n', '\r']);
+    let mut lines = rest.split('\n');
+    let info = lines.next()?;
+    let mut kv = HashMap::new();
+    let parts: Vec<&str> = info.trim_start_matches('\\').split('\\').collect();
+    let mut it = parts.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        kv.insert(k.to_string(), v.to_string());
+    }
+    let players = lines.filter(|l| !l.trim().is_empty()).count() as i32;
+    Some(A2sInfo {
+        name: kv.get("hostname").cloned(),
+        map: kv.get("mapname").cloned(),
+        players: Some(players),
+        max: kv.get("maxclients").and_then(|s| s.parse::<i32>().ok()),
+    })
+}
+
+async fn poll_quake2(
+    state: &AppState,
+    game_id: i32,
+    gamename: &str,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let text = state
+        .http
+        .get("https://q2servers.com/?raw=1")
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await?
+        .text()
+        .await?;
+    let addrs: Vec<SocketAddrV4> = text.lines().filter_map(|l| l.trim().parse::<SocketAddrV4>().ok()).collect();
+    let details = futures::stream::iter(addrs.into_iter().map(|sa| async move { (sa, q2_status(sa).await) }))
+        .buffer_unordered(64)
+        .collect::<Vec<_>>()
+        .await;
+    let client = state.pool.get().await?;
+    let mut out: Vec<ServerOut> = Vec::new();
+    for (sa, d) in details {
+        let info = match d {
+            Some(i) if i.name.is_some() => i,
+            _ => continue,
+        };
+        let ip = IpAddr::V4(*sa.ip());
+        let port = sa.port() as i32;
+        let name = clean(info.name);
+        let map = clean(info.map);
+        upsert_server(&client, game_id, ip, port, &name, &map, &None, info.players, info.max, "quake2").await?;
+        out.push(ServerOut { address: sa.ip().to_string(), port, name, map, gametype: None, players: info.players, max_players: info.max, source: "quake2".into() });
+    }
+    cache_servers(state, gamename, &out).await?;
+    Ok(out.len())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn upsert_server(
     client: &deadpool_postgres::Client,
@@ -602,16 +667,16 @@ async fn upsert_server(
 async fn poll_quake(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = state.pool.get().await?;
     let rows = client
-        .query("SELECT id, gamename, query_proto FROM games WHERE query_proto IN ('quake','quake3') AND supported", &[])
+        .query("SELECT id, gamename, query_proto FROM games WHERE query_proto IN ('quake','quake2','quake3') AND supported", &[])
         .await?;
     for row in rows {
         let game_id: i32 = row.get(0);
         let gamename: String = row.get(1);
         let proto: String = row.get(2);
-        let res = if proto == "quake3" {
-            poll_quake3(state, game_id, &gamename).await
-        } else {
-            poll_quakeworld(state, game_id, &gamename).await
+        let res = match proto.as_str() {
+            "quake3" => poll_quake3(state, game_id, &gamename).await,
+            "quake2" => poll_quake2(state, game_id, &gamename).await,
+            _ => poll_quakeworld(state, game_id, &gamename).await,
         };
         match res {
             Ok(n) => tracing::info!("{gamename}: {n} servers ({proto})"),
