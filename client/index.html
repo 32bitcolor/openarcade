@@ -8,17 +8,76 @@
   </head>
   <body>
     <div id="app">
-      <nav id="tabs" aria-label="Sections">
-        <button class="tab active" data-tab="games">My Games</button>
-        <button class="tab" data-tab="browser">Server Browser</button>
-        <button class="tab" data-tab="rooms">Rooms</button>
-        <button class="tab" data-tab="buddies">Buddies</button>
-        <button class="tab" data-tab="downloads">Downloads</button>
-        <button class="tab" data-tab="news">News</button>
-      </nav>
-      <main id="view">
-        <p class="status" id="status">Connecting to arcade-api…</p>
-      </main>
+      <div id="titlebar">
+        <span class="logo">Open<b>Arcade</b></span>
+        <span class="status"><span class="dot" id="conn-dot"></span> <span id="conn-text">connecting…</span></span>
+        <span class="spacer"></span>
+        <span class="nick" id="nick" title="Click to change your nickname">guest</span>
+      </div>
+
+      <div id="toolbar">
+        <button class="tbtn on" data-view="games">🎮 My Games</button>
+        <button class="tbtn" data-view="buddies">👥 Buddies</button>
+        <button class="tbtn" data-view="news">📰 News</button>
+        <button class="tbtn" data-view="options">⚙ Options</button>
+      </div>
+
+      <div id="body">
+        <div id="rail">
+          <div class="railhdr">Games</div>
+          <div class="list" id="gamelist"></div>
+        </div>
+
+        <div id="main">
+          <div id="home">
+            <h1>Open<b>Arcade</b></h1>
+            <div class="hint">Pick a game on the left to enter its room — live servers, chat, and who's around.</div>
+            <div class="hint" id="home-stat"></div>
+          </div>
+
+          <div id="room" class="hidden">
+            <div id="roomhdr">
+              <span id="room-title">—</span>
+              <span class="sub" id="room-sub"></span>
+              <span class="spacer"></span>
+              <button class="fbtn" id="btn-refresh">↻ Refresh</button>
+            </div>
+
+            <div id="browserwrap">
+              <div id="filters">
+                <label><input type="checkbox" id="f-empty"> Hide empty</label>
+                <label><input type="checkbox" id="f-full"> Hide full</label>
+                <label>Find: <input type="text" id="f-search" placeholder="server or map…"></label>
+                <span class="spacer" style="flex:1"></span>
+                <span id="srv-count" class="col-addr"></span>
+              </div>
+              <div class="tablescroll">
+                <table class="browser">
+                  <thead>
+                    <tr id="browser-head"></tr>
+                  </thead>
+                  <tbody id="browser-body"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div id="lower">
+              <div id="chatwrap">
+                <div class="paneltitle">Room Chat</div>
+                <div id="chatlog"></div>
+                <div id="chatinput">
+                  <input type="text" id="chat-text" placeholder="Say something to the room…" maxlength="300" />
+                  <button id="chat-send">Send</button>
+                </div>
+              </div>
+              <div id="members">
+                <div class="paneltitle">Members (<span id="member-count">0</span>)</div>
+                <div id="memberlist"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>
