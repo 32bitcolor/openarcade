@@ -122,6 +122,32 @@ fn hand_name(e: &[u8; 6]) -> &'static str {
     }
 }
 
+/// Crude 0..1 hand-strength estimate for the bot.
+fn bot_strength(hole: &[Card], board: &[Card]) -> f64 {
+    if hole.len() < 2 {
+        return 0.0;
+    }
+    if board.is_empty() {
+        let (a, b) = (hole[0].rank as f64, hole[1].rank as f64);
+        let mut s = (a.max(b) - 2.0) / 12.0 * 0.5;
+        if hole[0].rank == hole[1].rank {
+            s = 0.5 + (a - 2.0) / 12.0 * 0.5; // a pocket pair
+        }
+        if hole[0].suit == hole[1].suit {
+            s += 0.05;
+        }
+        if (a - b).abs() == 1.0 {
+            s += 0.03;
+        }
+        s.min(1.0)
+    } else {
+        let mut seven = hole.to_vec();
+        seven.extend_from_slice(board);
+        let e = eval7(&seven);
+        ((e[0] as f64) / 8.0 + (e[1] as f64) / 14.0 * 0.05).min(1.0)
+    }
+}
+
 // --- Table -----------------------------------------------------------------
 #[derive(Clone)]
 struct Seat {
@@ -133,6 +159,7 @@ struct Seat {
     allin: bool,
     acted: bool,
     in_hand: bool,
+    is_bot: bool,
     hole: Vec<Card>,
 }
 
@@ -181,8 +208,9 @@ impl Table {
     /// Handle a player action; returns messages to deliver.
     pub fn handle(&mut self, nick: &str, g: &Value) -> Vec<Out> {
         let act = g.get("do").and_then(|x| x.as_str()).unwrap_or("");
-        match act {
+        let mut outs = match act {
             "sit" => self.sit(nick),
+            "sitbot" => self.sit_bot(),
             "leave" => self.leave(nick),
             "start" => self.start_hand(),
             "state" => self.broadcast_state(),
@@ -191,6 +219,51 @@ impl Table {
                 self.player_action(nick, act, amount)
             }
             _ => vec![],
+        };
+        outs.extend(self.run_bots());
+        outs
+    }
+
+    /// While it's a bot's turn, let the bot act (drives the hand forward).
+    fn run_bots(&mut self) -> Vec<Out> {
+        let mut outs = Vec::new();
+        let mut guard = 0;
+        while self.hand_active && guard < 200 {
+            guard += 1;
+            let i = self.to_act;
+            let bot_turn = self.seats[i].as_ref().map(|s| s.is_bot && s.in_hand && !s.folded && !s.allin).unwrap_or(false);
+            if !bot_turn {
+                break;
+            }
+            let nick = self.seats[i].as_ref().unwrap().nick.clone();
+            let (act, amount) = self.bot_decision(i);
+            outs.extend(self.player_action(&nick, &act, amount));
+        }
+        outs
+    }
+
+    fn bot_decision(&self, i: usize) -> (String, i64) {
+        let s = self.seats[i].as_ref().unwrap();
+        let to_call = (self.current_bet - s.bet).max(0);
+        let strength = bot_strength(&s.hole, &self.board);
+        let r: f64 = rand::random();
+        if to_call == 0 {
+            if strength > 0.72 && r < 0.6 {
+                ("raise".to_string(), self.current_bet + self.min_raise * 2)
+            } else {
+                ("check".to_string(), 0)
+            }
+        } else {
+            let pot_odds = to_call as f64 / (self.pot + to_call).max(1) as f64;
+            if strength > 0.82 && r < 0.5 && s.chips > to_call + self.min_raise {
+                ("raise".to_string(), self.current_bet + self.min_raise * 2)
+            } else if strength < 0.25 && to_call > BIG_BLIND {
+                ("fold".to_string(), 0)
+            } else if strength > pot_odds || to_call <= BIG_BLIND {
+                ("call".to_string(), 0)
+            } else {
+                ("fold".to_string(), 0)
+            }
         }
     }
 
@@ -201,7 +274,17 @@ impl Table {
         if let Some(slot) = self.seats.iter_mut().find(|s| s.is_none()) {
             *slot = Some(Seat {
                 nick: nick.to_string(), chips: BUYIN, bet: 0, committed: 0,
-                folded: false, allin: false, acted: false, in_hand: false, hole: Vec::new(),
+                folded: false, allin: false, acted: false, in_hand: false, is_bot: false, hole: Vec::new(),
+            });
+        }
+        self.broadcast_state()
+    }
+
+    fn sit_bot(&mut self) -> Vec<Out> {
+        if let Some(i) = self.seats.iter().position(|s| s.is_none()) {
+            self.seats[i] = Some(Seat {
+                nick: format!("🤖 CPU-{}", i + 1), chips: BUYIN, bet: 0, committed: 0,
+                folded: false, allin: false, acted: false, in_hand: false, is_bot: true, hole: Vec::new(),
             });
         }
         self.broadcast_state()

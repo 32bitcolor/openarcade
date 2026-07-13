@@ -95,6 +95,8 @@ function pokerSession(root, controls, { pokerSend, getNick }) {
       ctl += `<button class="minibtn" data-do="leave">Leave</button>`;
       if (!active) ctl += ` <button class="fbtn" data-do="start">Deal</button>`;
     }
+    const hasEmpty = (table?.seats || []).some((s) => s.empty);
+    if (!active && hasEmpty) ctl += ` <button class="minibtn" data-do="sitbot">+ CPU</button>`;
     if (active && table.toAct === myNick()) {
       const me = mySeat();
       const toCall = (table.currentBet || 0) - (me?.bet || 0);
@@ -142,6 +144,11 @@ function pokerSession(root, controls, { pokerSend, getNick }) {
   return { onPoker, destroy() { root.innerHTML = ""; controls.innerHTML = ""; } };
 }
 
+function wireBotButtons(controls, send) {
+  controls.querySelectorAll("[data-bot]").forEach((el) =>
+    el.addEventListener("click", () => send({ a: "sit", color: Number(el.dataset.bot), bot: true })));
+}
+
 function cardHtml(code) {
   if (!code || code.length < 2) return "";
   const r = code[0], s = code[1];
@@ -153,13 +160,29 @@ function cardHtml(code) {
 // ---- Reversi session ------------------------------------------------------
 function reversiSession(root, controls, { send, getNick }) {
   let needSync = true;
+  let botPending = false;
   let st = {
     board: initBoard(),
     turn: B,
     seats: { 1: null, 2: null }, // color -> nick
+    botOwner: { 1: null, 2: null }, // color -> owner nick (bot seats)
     winner: null, // null | 1 | 2 | 'draw'
   };
   const myNick = () => getNick();
+
+  function driveBots() {
+    if (st.winner) return;
+    if (st.botOwner[st.turn] === myNick() && !botPending) {
+      botPending = true;
+      setTimeout(() => {
+        botPending = false;
+        if (!st.winner && st.botOwner[st.turn] === myNick()) {
+          const mv = reversiBot(st);
+          if (mv) send({ a: "move", r: mv.r, c: mv.c, bot: st.turn });
+        }
+      }, 650);
+    }
+  }
   const mySeat = () => (st.seats[B] === myNick() ? B : st.seats[W] === myNick() ? W : 0);
 
   function advanceTurn(p) {
@@ -183,18 +206,22 @@ function reversiSession(root, controls, { send, getNick }) {
     switch (g.a) {
       case "sit": {
         const col = g.color === W ? W : B;
-        if (!st.seats[col] && st.seats[oppOf(col)] !== from) st.seats[col] = from;
+        if (!st.seats[col]) {
+          if (g.bot) { st.seats[col] = BOT_NICK; st.botOwner[col] = from; }
+          else if (st.seats[oppOf(col)] !== from) st.seats[col] = from;
+        }
         break;
       }
       case "stand":
-        if (st.seats[g.color] === from) st.seats[g.color] = null;
+        if (st.seats[g.color] === from || st.botOwner[g.color] === from) { st.seats[g.color] = null; st.botOwner[g.color] = null; }
         break;
       case "reset":
         st.board = initBoard(); st.turn = B; st.winner = null;
         break;
       case "move": {
         if (st.winner) break;
-        if (from !== st.seats[st.turn]) break; // only the player on turn
+        const allowed = g.bot != null ? (st.botOwner[g.bot] === from && g.bot === st.turn) : (from === st.seats[st.turn]);
+        if (!allowed) break;
         const f = flipsFor(st.board, g.r, g.c, st.turn);
         if (!f.length) break;
         st.board[g.r * 8 + g.c] = st.turn;
@@ -234,6 +261,7 @@ function reversiSession(root, controls, { send, getNick }) {
       el.addEventListener("click", () => send({ a: "stand", color: Number(el.dataset.stand) })));
     const rb = controls.querySelector('[data-act="reset"]');
     if (rb) rb.addEventListener("click", () => send({ a: "reset" }));
+    wireBotButtons(controls, send);
 
     const canPlay = mySeat() === st.turn && !st.winner;
     let html = '<div class="reversi">';
@@ -248,11 +276,16 @@ function reversiSession(root, controls, { send, getNick }) {
     root.innerHTML = html;
     root.querySelectorAll(".cell").forEach((el) =>
       el.addEventListener("click", () => localMove(Number(el.dataset.r), Number(el.dataset.c))));
+    driveBots();
   }
 
   function seatBtn(color) {
     if (st.seats[color] === myNick()) return `<button class="minibtn" data-stand="${color}">stand</button>`;
-    if (!st.seats[color] && !mySeat()) return `<button class="minibtn" data-sit="${color}">sit</button>`;
+    if (st.botOwner[color] === myNick()) return `<button class="minibtn" data-stand="${color}">remove bot</button>`;
+    if (!st.seats[color]) {
+      const sit = !mySeat() ? `<button class="minibtn" data-sit="${color}">sit</button> ` : "";
+      return sit + `<button class="minibtn" data-bot="${color}">+ CPU</button>`;
+    }
     return "";
   }
 
@@ -353,12 +386,27 @@ function ckWinner(bd, next) {
 // ---- Checkers session -----------------------------------------------------
 function checkersSession(root, controls, { send, getNick }) {
   let needSync = true;
-  let st = { board: ckInit(), turn: "b", seats: { 1: null, 2: null }, winner: null };
+  let botPending = false;
+  let st = { board: ckInit(), turn: "b", seats: { 1: null, 2: null }, botOwner: { 1: null, 2: null }, winner: null };
   let jpath = null; // in-progress selection/jump path
 
   const myNick = () => getNick();
   const seatColor = () => (st.seats[1] === myNick() ? "b" : st.seats[2] === myNick() ? "w" : null);
   const seatOfColor = (c) => (c === "b" ? 1 : 2);
+  function driveBots() {
+    if (st.winner) return;
+    if (st.botOwner[seatOfColor(st.turn)] === myNick() && !botPending) {
+      botPending = true;
+      setTimeout(() => {
+        botPending = false;
+        const s2 = seatOfColor(st.turn);
+        if (!st.winner && st.botOwner[s2] === myNick()) {
+          const mv = checkersBot(st);
+          if (mv) send({ a: "move", path: mv.path, bot: s2 });
+        }
+      }, 650);
+    }
+  }
 
   function onCell(idx) {
     if (st.winner || seatColor() !== st.turn) return;
@@ -390,14 +438,19 @@ function checkersSession(root, controls, { send, getNick }) {
     switch (g.a) {
       case "sit": {
         const s = g.color === 2 ? 2 : 1;
-        if (!st.seats[s] && st.seats[s === 1 ? 2 : 1] !== from) st.seats[s] = from;
+        if (!st.seats[s]) {
+          if (g.bot) { st.seats[s] = BOT_NICK; st.botOwner[s] = from; }
+          else if (st.seats[s === 1 ? 2 : 1] !== from) st.seats[s] = from;
+        }
         break;
       }
-      case "stand": if (st.seats[g.color] === from) st.seats[g.color] = null; break;
+      case "stand": if (st.seats[g.color] === from || st.botOwner[g.color] === from) { st.seats[g.color] = null; st.botOwner[g.color] = null; } break;
       case "reset": st.board = ckInit(); st.turn = "b"; st.winner = null; jpath = null; break;
       case "move": {
         if (st.winner) break;
-        if (from !== st.seats[seatOfColor(st.turn)]) break;
+        const seat = seatOfColor(st.turn);
+        const allowed = g.bot != null ? (st.botOwner[g.bot] === from && g.bot === seat) : (from === st.seats[seat]);
+        if (!allowed) break;
         const res = applyPath(st.board, g.path);
         if (!res.ok) break;
         st.board = res.board;
@@ -430,6 +483,7 @@ function checkersSession(root, controls, { send, getNick }) {
       el.addEventListener("click", () => send({ a: "stand", color: Number(el.dataset.stand) })));
     const rb = controls.querySelector('[data-act="reset"]');
     if (rb) rb.addEventListener("click", () => send({ a: "reset" }));
+    wireBotButtons(controls, send);
 
     // legal target highlights for the in-progress selection
     let targets = new Set();
@@ -456,12 +510,17 @@ function checkersSession(root, controls, { send, getNick }) {
     html += "</div>";
     root.innerHTML = html;
     root.querySelectorAll(".csq").forEach((el) => el.addEventListener("click", () => onCell(Number(el.dataset.i))));
+    driveBots();
   }
 
   function seatBtn(color) {
     const s = seatOfColor(color);
     if (st.seats[s] === myNick()) return `<button class="minibtn" data-stand="${s}">stand</button>`;
-    if (!st.seats[s] && !seatColor()) return `<button class="minibtn" data-sit="${s}">sit</button>`;
+    if (st.botOwner[s] === myNick()) return `<button class="minibtn" data-stand="${s}">remove bot</button>`;
+    if (!st.seats[s]) {
+      const sit = !seatColor() ? `<button class="minibtn" data-sit="${s}">sit</button> ` : "";
+      return sit + `<button class="minibtn" data-bot="${s}">+ CPU</button>`;
+    }
     return "";
   }
 
@@ -657,13 +716,29 @@ const GLYPH = { K: "♔", Q: "♕", R: "♖", B: "♗", N: "♘", P: "♙", k: "
 
 function chessSession(root, controls, { send, getNick }) {
   let needSync = true;
+  let botPending = false;
   let st = chInit();
   st.seats = { 1: null, 2: null }; // 1 = White, 2 = black
+  st.botOwner = { 1: null, 2: null };
   let sel = null;
 
   const myNick = () => getNick();
   const seatColor = () => (st.seats[1] === myNick() ? CW : st.seats[2] === myNick() ? CB2 : null);
   const seatOf = (c) => (c === CW ? 1 : 2);
+  function driveBots() {
+    if (st.result) return;
+    if (st.botOwner[seatOf(st.turn)] === myNick() && !botPending) {
+      botPending = true;
+      setTimeout(() => {
+        botPending = false;
+        const s2 = seatOf(st.turn);
+        if (!st.result && st.botOwner[s2] === myNick()) {
+          const mv = chessBot(st);
+          if (mv) send({ a: "move", from: mv.from, to: mv.to, promo: mv.promo, bot: s2 });
+        }
+      }, 450);
+    }
+  }
 
   function onCell(i) {
     if (st.result || seatColor() !== st.turn) return;
@@ -690,17 +765,23 @@ function chessSession(root, controls, { send, getNick }) {
     switch (g.a) {
       case "sit": {
         const s = g.color === 2 ? 2 : 1;
-        if (!st.seats[s] && st.seats[s === 1 ? 2 : 1] !== from) st.seats[s] = from;
+        if (!st.seats[s]) {
+          if (g.bot) { st.seats[s] = BOT_NICK; st.botOwner[s] = from; }
+          else if (st.seats[s === 1 ? 2 : 1] !== from) st.seats[s] = from;
+        }
         break;
       }
-      case "stand": if (st.seats[g.color] === from) st.seats[g.color] = null; break;
-      case "reset": { const seats = st.seats; st = chInit(); st.seats = seats; sel = null; break; }
+      case "stand": if (st.seats[g.color] === from || st.botOwner[g.color] === from) { st.seats[g.color] = null; st.botOwner[g.color] = null; } break;
+      case "reset": { const seats = st.seats, bo = st.botOwner; st = chInit(); st.seats = seats; st.botOwner = bo; sel = null; break; }
       case "move": {
         if (st.result) break;
-        if (from !== st.seats[seatOf(st.turn)]) break;
+        const seat = seatOf(st.turn);
+        const allowed = g.bot != null ? (st.botOwner[g.bot] === from && g.bot === seat) : (from === st.seats[seat]);
+        if (!allowed) break;
         const ns = chMove(st, { from: g.from, to: g.to, promo: g.promo });
         if (!ns) break;
         ns.seats = st.seats;
+        ns.botOwner = st.botOwner;
         st = ns;
         break;
       }
@@ -728,6 +809,7 @@ function chessSession(root, controls, { send, getNick }) {
     controls.querySelectorAll("[data-stand]").forEach((el) => el.addEventListener("click", () => send({ a: "stand", color: Number(el.dataset.stand) })));
     const rb = controls.querySelector('[data-act="reset"]');
     if (rb) rb.addEventListener("click", () => send({ a: "reset" }));
+    wireBotButtons(controls, send);
 
     const targets = new Set();
     if (sel !== null) chLegal(st).filter((m) => m.from === sel).forEach((m) => targets.add(m.to));
@@ -744,12 +826,17 @@ function chessSession(root, controls, { send, getNick }) {
     html += "</div>";
     root.innerHTML = html;
     root.querySelectorAll(".csq2").forEach((el) => el.addEventListener("click", () => onCell(Number(el.dataset.i))));
+    driveBots();
   }
 
   function seatBtn(color) {
     const s = seatOf(color);
     if (st.seats[s] === myNick()) return `<button class="minibtn" data-stand="${s}">stand</button>`;
-    if (!st.seats[s] && !seatColor()) return `<button class="minibtn" data-sit="${s}">sit</button>`;
+    if (st.botOwner[s] === myNick()) return `<button class="minibtn" data-stand="${s}">remove bot</button>`;
+    if (!st.seats[s]) {
+      const sit = !seatColor() ? `<button class="minibtn" data-sit="${s}">sit</button> ` : "";
+      return sit + `<button class="minibtn" data-bot="${s}">+ CPU</button>`;
+    }
     return "";
   }
 
@@ -758,9 +845,90 @@ function chessSession(root, controls, { send, getNick }) {
   return { handle, destroy() { root.innerHTML = ""; controls.innerHTML = ""; } };
 }
 
+// ---- Bot AIs --------------------------------------------------------------
+const BOT_NICK = "🤖 CPU";
+
+// Reversi: greedy — most flips, weighted for corners/edges.
+function reversiBot(st) {
+  const weight = (r, c) => {
+    const corner = (r === 0 || r === 7) && (c === 0 || c === 7);
+    const nearCorner = (r <= 1 || r >= 6) && (c <= 1 || c >= 6) && !corner;
+    const edge = r === 0 || r === 7 || c === 0 || c === 7;
+    return corner ? 25 : nearCorner ? -8 : edge ? 3 : 0;
+  };
+  let best = null, bestScore = -1e9;
+  for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
+    const f = flipsFor(st.board, r, c, st.turn);
+    if (f.length) {
+      const s = f.length + weight(r, c);
+      if (s > bestScore) { bestScore = s; best = { r, c }; }
+    }
+  }
+  return best;
+}
+
+// Checkers: enumerate legal complete moves, prefer longest capture.
+function ckEnumJumps(board, path, out) {
+  const partial = applyPartial(board, path);
+  if (!partial) return;
+  const nexts = partial.promoted ? [] : jumpsFrom(partial.bd, partial.cur);
+  if (!nexts.length) { if (path.length > 1) out.push(path); return; }
+  for (const j of nexts) ckEnumJumps(board, path.concat([j.land]), out);
+}
+function checkersMoves(board, color) {
+  const jumps = [];
+  for (let i = 0; i < 64; i++) if (colorOf(board[i]) === color) ckEnumJumps(board, [i], jumps);
+  if (jumps.length) return jumps;
+  const simple = [];
+  for (let i = 0; i < 64; i++) if (colorOf(board[i]) === color) simpleFrom(board, i).forEach((t) => simple.push([i, t]));
+  return simple;
+}
+function checkersBot(st) {
+  const moves = checkersMoves(st.board, st.turn);
+  if (!moves.length) return null;
+  moves.sort((a, b) => b.length - a.length); // longest captures first
+  const topLen = moves[0].length;
+  const top = moves.filter((m) => m.length === topLen);
+  return { path: top[Math.floor(botRand() * top.length)] };
+}
+
+// Chess: 2-ply negamax on material.
+const CVAL = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000 };
+function evalSTM(st) {
+  let s = 0;
+  for (const p of st.board) if (p) s += pcColor(p) === st.turn ? CVAL[p.toLowerCase()] : -CVAL[p.toLowerCase()];
+  return s;
+}
+function negamax(st, depth) {
+  if (st.result) return st.result === "draw" ? 0 : -99999; // side to move was mated
+  if (depth === 0) return evalSTM(st);
+  let best = -1e9;
+  for (const m of chLegal(st)) {
+    const v = -negamax(chMove(st, m), depth - 1);
+    if (v > best) best = v;
+  }
+  return best;
+}
+function chessBot(st) {
+  const moves = chLegal(st);
+  if (!moves.length) return null;
+  let best = -1e9, pick = [];
+  for (const m of moves) {
+    const v = -negamax(chMove(st, m), 1); // 2-ply total
+    if (v > best) { best = v; pick = [m]; }
+    else if (v === best) pick.push(m);
+  }
+  const m = pick[Math.floor(botRand() * pick.length)];
+  return { from: m.from, to: m.to, promo: m.promo };
+}
+
+// Cheap PRNG for bot variety (Math.random is fine here; not synced state).
+function botRand() { return Math.random(); }
+
 // Exposed for tests (rule functions are pure).
 export const _ck = { ckInit, applyPath, jumpsFrom, simpleFrom, hasJump, ckWinner, P, colorOf };
 export const _chess = { chInit, chLegal, chMove, inCheck, isAttacked, pcColor };
+export const _bots = { reversiBot, checkersBot, chessBot, checkersMoves };
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
