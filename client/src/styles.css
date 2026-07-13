@@ -166,6 +166,25 @@ tr.sel .col-addr { color: #dbe7fb; }
 .dettable td.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .dettable tbody tr:nth-child(even) { background: #f6f8fb; }
 
+/* staging rooms */
+#stagewrap { flex: 1 1 60%; overflow: auto; margin: 6px; min-height: 0; }
+.stg-hdr { font-weight: 700; font-size: 13px; color: var(--accent); padding: 4px 2px 8px; display: flex; align-items: center; gap: 10px; }
+.stg-params { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; margin-bottom: 8px; }
+.stg-params.ro { color: var(--ink2); }
+.stg-params label { display: inline-flex; align-items: center; gap: 4px; }
+.stg-params input { padding: 2px 5px; }
+.stg-members { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px; margin-bottom: 8px; }
+.stg-member { padding: 5px 8px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #f0f0f0; }
+.stg-member .rl { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); box-shadow: 0 0 3px rgba(0,0,0,.3); }
+.stg-member.ready .rl { background: #2ecc40; }
+.stg-hosttag { font-size: 9.5px; background: var(--accent); color: #fff; padding: 1px 6px; border-radius: 4px; }
+.stg-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.stg-actions .fbtn { padding: 6px 14px; cursor: pointer; }
+#stg-launch { background: #2ecc40; color: #063; font-weight: 700; border-color: #1a9c2c; }
+.stg-list { display: flex; flex-direction: column; gap: 4px; }
+.stg-listrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+.stg-none { color: var(--ink2); font-style: italic; padding: 12px; }
+
 /* ---- parlor games ---- */
 #parlorwrap { flex: 1 1 60%; display: flex; flex-direction: column; min-height: 0; margin: 6px; overflow: auto; }
 #parlor-controls { padding: 6px 8px; background: var(--chrome); }

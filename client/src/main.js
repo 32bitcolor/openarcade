@@ -21,7 +21,11 @@ const state = {
   ws: null,
   sort: { key: "players", dir: -1 },
   filters: { empty: false, full: false, search: "" },
+  staging: { list: [], room: null },
 };
+
+// Peer-hosted games (no dedicated servers) — use GameSpy-style staging rooms.
+const HOSTED = new Set(["avp"]);
 
 const $ = (id) => document.getElementById(id);
 
@@ -112,6 +116,8 @@ function addGroup(list, label) {
 // Room view
 // ---------------------------------------------------------------------------
 function leaveCurrent() {
+  if (state.staging?.room) wsSend({ type: "lobby", do: "leave", id: state.staging.room.id });
+  if (state.staging) state.staging.room = null;
   if (state.room) wsSend({ type: "leave", room: state.room });
   if (state.parlor) { state.parlor.destroy(); state.parlor = null; }
 }
@@ -138,13 +144,21 @@ function selectGame(id) {
   state.mode = "server";
   state.current = id;
   state.room = `game-${id}`;
+  const hosted = HOSTED.has(id);
   $("parlorwrap").classList.add("hidden");
-  $("browserwrap").classList.remove("hidden");
-  enterRoomShell(g.title, `${g.source} · room #${state.room}`);
+  $("browserwrap").classList.toggle("hidden", hosted);
+  $("stagewrap").classList.toggle("hidden", !hosted);
+  enterRoomShell(g.title, hosted ? `peer-hosted · room #${state.room}` : `${g.source} · room #${state.room}`);
   sysLine(`Entered the ${g.title} room.`);
 
   wsSend({ type: "join", room: state.room });
-  loadServers(id);
+  if (hosted) {
+    state.staging = { list: [], room: null };
+    wsSend({ type: "lobby", do: "list", game: id });
+    renderStaging();
+  } else {
+    loadServers(id);
+  }
 }
 
 function enterParlor(key) {
@@ -156,6 +170,7 @@ function enterParlor(key) {
   state.current = `parlor:${key}`;
   state.room = `parlor-${key}`;
   $("browserwrap").classList.add("hidden");
+  $("stagewrap").classList.add("hidden");
   $("parlorwrap").classList.remove("hidden");
   enterRoomShell(p.title, `parlor game · room #${state.room}`);
   sysLine(`Sat down at ${p.title}. Take a seat to play.`);
@@ -365,6 +380,139 @@ function openModal(html) {
 function closeModal() { const m = $("modal"); m.classList.add("hidden"); m.innerHTML = ""; }
 
 // ---------------------------------------------------------------------------
+// Staging rooms (peer-hosted games, GameSpy-Arcade style)
+// ---------------------------------------------------------------------------
+function gameTitle(slug) { return state.games.find((g) => g.gamename === slug)?.title || slug; }
+
+function onLobby(m) {
+  if (state.mode !== "server" || !HOSTED.has(state.current)) return;
+  const st = state.staging;
+  switch (m.ev) {
+    case "list":
+      if (m.game === state.current) { st.list = m.rooms || []; if (!st.room) renderStaging(); }
+      break;
+    case "state":
+      if ((m.members || []).some((x) => x.nick === state.nick)) { st.room = m; renderStaging(); }
+      break;
+    case "disbanded":
+      if (st.room && st.room.id === m.id) { st.room = null; sysLine("The host closed the staging room."); wsSend({ type: "lobby", do: "list", game: state.current }); renderStaging(); }
+      break;
+    case "launch":
+      doHostedLaunch(m);
+      break;
+  }
+}
+
+function renderStaging() {
+  const el = $("stage-body");
+  const st = state.staging;
+  if (st.room) {
+    const r = st.room;
+    const isHost = r.host === state.nick;
+    const me = (r.members || []).find((x) => x.nick === state.nick);
+    const p = r.params || {};
+    const membersHtml = (r.members || []).map((x) =>
+      `<div class="stg-member${x.ready ? " ready" : ""}"><span class="rl"></span> ${escapeHtml(x.nick)}${x.nick === r.host ? ' <span class="stg-hosttag">HOST</span>' : ""} — ${x.ready ? "ready" : "not ready"}</div>`).join("");
+    const params = isHost
+      ? `<div class="stg-params">
+           <label>Map <input id="sp-map" value="${escapeHtml(p.map || "")}"></label>
+           <label>Type <input id="sp-type" value="${escapeHtml(p.gametype || "")}"></label>
+           <label>Max <input id="sp-max" type="number" value="${escapeHtml(String(p.maxplayers || 8))}" style="width:56px"></label>
+           <button class="minibtn" id="sp-save">Set</button>
+         </div>`
+      : `<div class="stg-params ro">Map <b>${escapeHtml(p.map || "—")}</b> · Type <b>${escapeHtml(p.gametype || "—")}</b> · Max <b>${escapeHtml(String(p.maxplayers || "—"))}</b></div>`;
+    el.innerHTML = `
+      <div class="stg-hdr">Staging Room — ${escapeHtml(r.host)}'s game <span class="col-addr">host ${escapeHtml(r.hostIp || "?")}</span></div>
+      ${params}
+      <div class="stg-members">${membersHtml}</div>
+      <div class="stg-actions">
+        <button class="fbtn" id="stg-ready">${me?.ready ? "Not ready" : "Ready"}</button>
+        ${isHost ? `<button class="fbtn" id="stg-launch">🚀 Launch</button>` : ""}
+        <button class="minibtn" id="stg-leave">Leave</button>
+        <button class="minibtn" id="stg-cfg">Configure launch…</button>
+      </div>
+      ${isHost ? "" : '<div class="hint">Waiting for the host to launch. Your game will boot and connect automatically.</div>'}`;
+    $("stg-ready")?.addEventListener("click", () => wsSend({ type: "lobby", do: "ready", id: r.id, ready: !me?.ready }));
+    $("stg-leave")?.addEventListener("click", leaveStaging);
+    $("stg-launch")?.addEventListener("click", () => wsSend({ type: "lobby", do: "launch", id: r.id }));
+    $("stg-cfg")?.addEventListener("click", () => configHostedLaunch(state.current));
+    $("sp-save")?.addEventListener("click", () => wsSend({ type: "lobby", do: "params", id: r.id, params: { map: $("sp-map").value, gametype: $("sp-type").value, maxplayers: Number($("sp-max").value) || 8 } }));
+  } else {
+    const rows = (st.list || []).map((r) => {
+      const p = r.params || {};
+      return `<div class="stg-listrow"><div><b>${escapeHtml(r.host)}</b>'s game — ${escapeHtml(p.map || "?")} · ${escapeHtml(p.gametype || "")} · ${r.count} player${r.count === 1 ? "" : "s"}</div><button class="minibtn" data-join="${r.id}">Join</button></div>`;
+    }).join("") || '<div class="stg-none">No open games. Host one to get started.</div>';
+    el.innerHTML = `
+      <div class="stg-hdr">Games — ${escapeHtml(gameTitle(state.current))}</div>
+      <div class="hint">Peer-hosted: someone hosts a match, others join the staging room, then the host launches — classic GameSpy Arcade.</div>
+      <div class="stg-actions"><button class="fbtn" id="stg-host">＋ Host a Game</button></div>
+      <div class="stg-list">${rows}</div>`;
+    $("stg-host")?.addEventListener("click", hostGame);
+    el.querySelectorAll("[data-join]").forEach((b) => b.addEventListener("click", () => wsSend({ type: "lobby", do: "join", id: b.dataset.join })));
+  }
+}
+
+function hostGame() {
+  openModal(`<h3>Host a Game — ${escapeHtml(gameTitle(state.current))}</h3>
+    <label>Map<br><input id="hg-map" class="cf-in" value=""></label>
+    <label>Game type<br><input id="hg-type" class="cf-in" value="Deathmatch"></label>
+    <label>Max players<br><input id="hg-max" class="cf-in" type="number" value="8"></label>
+    <div class="modal-actions"><button id="hg-create">Create staging room</button></div>`);
+  $("hg-create").addEventListener("click", () => {
+    wsSend({ type: "lobby", do: "host", game: state.current, params: { map: $("hg-map").value, gametype: $("hg-type").value, maxplayers: Number($("hg-max").value) || 8 } });
+    closeModal();
+  });
+}
+
+function leaveStaging() {
+  if (state.staging.room) wsSend({ type: "lobby", do: "leave", id: state.staging.room.id });
+  state.staging.room = null;
+  wsSend({ type: "lobby", do: "list", game: state.current });
+  renderStaging();
+}
+
+function getHostedProfile(game) {
+  const saved = localStorage.getItem("oa_hosted_" + game);
+  if (saved) { try { return JSON.parse(saved); } catch { /* ignore */ } }
+  return { program: "distrobox-host-exec", hostArgs: "", joinArgs: "" };
+}
+
+function configHostedLaunch(game) {
+  const prof = getHostedProfile(game);
+  openModal(`<h3>Configure Launch — ${escapeHtml(gameTitle(game))} (peer-hosted)</h3>
+    <p class="hint">Two commands — one for hosting a game, one for joining. Placeholders: <b>{host_ip} {map} {gametype} {maxplayers}</b>. Runs on your host via <span class="mono">distrobox-host-exec</span>.</p>
+    <label>Program<br><input id="hp-prog" class="cf-in" value="${escapeHtml(prof.program)}"></label>
+    <label>Host args (start a game)<br><input id="hp-host" class="cf-in" value="${escapeHtml(prof.hostArgs)}"></label>
+    <label>Join args (connect to {host_ip})<br><input id="hp-join" class="cf-in" value="${escapeHtml(prof.joinArgs)}"></label>
+    <div class="modal-actions"><button id="hp-save">Save</button></div>`);
+  $("hp-save").addEventListener("click", () => {
+    localStorage.setItem("oa_hosted_" + game, JSON.stringify({ program: $("hp-prog").value.trim(), hostArgs: $("hp-host").value.trim(), joinArgs: $("hp-join").value.trim() }));
+    sysLine("Saved hosted-launch config.");
+    closeModal();
+  });
+}
+
+async function doHostedLaunch(m) {
+  const game = state.current;
+  const isHost = m.host === state.nick;
+  const prof = getHostedProfile(game);
+  const tmpl = isHost ? prof.hostArgs : prof.joinArgs;
+  if (!prof.program || !tmpl) { sysLine("Launch not configured — Configure launch in the staging room."); configHostedLaunch(game); return; }
+  const p = m.params || {};
+  const argstr = tmpl
+    .replace(/\{host_ip\}/g, m.hostIp || "")
+    .replace(/\{map\}/g, p.map || "")
+    .replace(/\{gametype\}/g, p.gametype || "")
+    .replace(/\{maxplayers\}/g, p.maxplayers ?? "");
+  try {
+    await invoke("launch", { program: prof.program, args: argstr.split(/\s+/).filter(Boolean) });
+    sysLine(`Launching ${game} — ${isHost ? "hosting" : "joining " + m.hostIp}…`);
+  } catch (e) {
+    sysLine(`Launch failed: ${e}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Chat + members (WebSocket)
 // ---------------------------------------------------------------------------
 function connectWS() {
@@ -400,6 +548,8 @@ function onWs(m) {
       if (state.parlor?.handle && m.room === state.room) state.parlor.handle(m.g, m.nick); break;
     case "poker":
       if (state.parlor?.onPoker && m.room === state.room) state.parlor.onPoker(m); break;
+    case "lobby":
+      onLobby(m); break;
   }
 }
 
