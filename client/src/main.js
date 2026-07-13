@@ -159,8 +159,10 @@ function enterParlor(key) {
 
   wsSend({ type: "join", room: state.room });
   const send = (payload) => wsSend({ type: "game", room: state.room, g: payload });
+  const pokerSend = (payload) => wsSend({ type: "poker", room: state.room, ...payload });
   state.parlor = createParlorSession(key, $("parlorboard"), $("parlor-controls"), {
     send,
+    pokerSend,
     getNick: () => state.nick,
   });
 }
@@ -283,7 +285,9 @@ function onWs(m) {
     case "chat":
       if (m.room === state.room) chatLine(m.nick, m.text); break;
     case "game":
-      if (state.parlor && m.room === state.room) state.parlor.handle(m.g, m.nick); break;
+      if (state.parlor?.handle && m.room === state.room) state.parlor.handle(m.g, m.nick); break;
+    case "poker":
+      if (state.parlor?.onPoker && m.room === state.room) state.parlor.onPoker(m); break;
   }
 }
 

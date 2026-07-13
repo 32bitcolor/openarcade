@@ -57,7 +57,97 @@ export function createParlorSession(gameKey, root, controls, io) {
   }
   if (gameKey === "checkers") return checkersSession(root, controls, io);
   if (gameKey === "chess") return chessSession(root, controls, io);
+  if (gameKey === "poker") return pokerSession(root, controls, io);
   return reversiSession(root, controls, io);
+}
+
+// ---- Poker session (server-authoritative) ---------------------------------
+function pokerSession(root, controls, { pokerSend, getNick }) {
+  let table = null;
+  let hole = [];
+  let showdown = null;
+  const myNick = () => getNick();
+  const mySeat = () => table?.seats?.find((s) => s.nick === myNick());
+
+  function onPoker(m) {
+    if (m.ev === "state") { table = m; if (m.handActive) showdown = null; render(); }
+    else if (m.ev === "hole") { hole = m.cards || []; render(); }
+    else if (m.ev === "showdown") { showdown = m; render(); }
+  }
+
+  function status() {
+    if (showdown && !table?.handActive) {
+      const w = showdown.winners || [];
+      return `Showdown — ${w.join(", ") || "nobody"} win${w.length === 1 ? "s" : ""} ${showdown.pot} chips`;
+    }
+    if (!table) return "Connecting to the table…";
+    if (!table.handActive) return "Waiting — sit down, then Deal (need 2+ players).";
+    const stages = ["", "Pre-flop", "Flop", "Turn", "River"];
+    return `${stages[table.stage] || ""} · pot ${table.pot} · ${table.toAct || "?"} to act`;
+  }
+
+  function render() {
+    const seated = !!mySeat();
+    const active = table?.handActive;
+    let ctl = "";
+    if (!seated) ctl += `<button class="fbtn" data-do="sit">Sit (buy-in 1000)</button>`;
+    else {
+      ctl += `<button class="minibtn" data-do="leave">Leave</button>`;
+      if (!active) ctl += ` <button class="fbtn" data-do="start">Deal</button>`;
+    }
+    if (active && table.toAct === myNick()) {
+      const me = mySeat();
+      const toCall = (table.currentBet || 0) - (me?.bet || 0);
+      ctl += ` &nbsp;&nbsp; `;
+      ctl += toCall <= 0 ? `<button class="fbtn" data-do="check">Check</button>` : `<button class="fbtn" data-do="call">Call ${toCall}</button>`;
+      ctl += ` <button class="fbtn" data-do="raise">Raise…</button> <button class="minibtn" data-do="fold">Fold</button>`;
+    }
+    controls.innerHTML = `<div class="parlor-status">${status()}</div><div class="parlor-seats">${ctl}</div>`;
+    controls.querySelectorAll("[data-do]").forEach((el) => el.addEventListener("click", () => act(el.dataset.do)));
+
+    if (!table) { root.innerHTML = ""; return; }
+    const board = (table.board || []).map(cardHtml).join("") || '<span class="pk-empty">community cards appear here</span>';
+    const seats = (table.seats || []).map((s) => {
+      if (s.empty) return `<div class="pk-seat empty">empty</div>`;
+      const me = s.nick === myNick();
+      const badges = `${s.dealer ? '<span class="pk-d">D</span>' : ""}${s.folded ? '<span class="pk-tag fold">folded</span>' : ""}${s.allin ? '<span class="pk-tag allin">all-in</span>' : ""}`;
+      const cards = me && hole.length ? hole.map(cardHtml).join("") : (s.inHand && !s.folded ? '<span class="pk-back">🂠 🂠</span>' : "");
+      return `<div class="pk-seat${s.acting ? " acting" : ""}${me ? " me" : ""}">
+        <div class="pk-name">${escapeHtml(s.nick)} ${badges}</div>
+        <div class="pk-chips">${s.chips} chips${s.bet ? ` · bet ${s.bet}` : ""}</div>
+        <div class="pk-cards">${cards}</div></div>`;
+    }).join("");
+    let sd = "";
+    if (showdown && !table.handActive && (showdown.results || []).length) {
+      sd = '<div class="pk-sd">' + showdown.results.map((r) => `${escapeHtml(r.nick)}: <b>${r.hand}</b> ${r.cards.map(cardHtml).join("")}`).join("<br>") + "</div>";
+    }
+    root.innerHTML = `<div class="poker">
+      <div class="pk-board"><div class="pk-pot">POT ${table.pot || 0}</div><div class="pk-comm">${board}</div></div>
+      <div class="pk-seats">${seats}</div>${sd}</div>`;
+  }
+
+  function act(a) {
+    if (a === "raise") {
+      const min = (table.currentBet || 0) + (table.minRaise || 10);
+      const v = prompt(`Raise to (min ${min}):`, String(min));
+      const amt = parseInt(v, 10);
+      if (amt) pokerSend({ do: "raise", amount: amt });
+    } else {
+      pokerSend({ do: a });
+    }
+  }
+
+  pokerSend({ do: "state" });
+  render();
+  return { onPoker, destroy() { root.innerHTML = ""; controls.innerHTML = ""; } };
+}
+
+function cardHtml(code) {
+  if (!code || code.length < 2) return "";
+  const r = code[0], s = code[1];
+  const sym = { c: "♣", d: "♦", h: "♥", s: "♠" }[s] || "?";
+  const red = s === "d" || s === "h";
+  return `<span class="pk-card${red ? " red" : ""}">${r === "T" ? "10" : r}${sym}</span>`;
 }
 
 // ---- Reversi session ------------------------------------------------------
