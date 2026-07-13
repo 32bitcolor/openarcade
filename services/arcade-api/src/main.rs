@@ -799,6 +799,18 @@ struct PlayerOut {
     time: Option<f64>, // seconds connected (Valve only)
 }
 
+fn read_cstr(buf: &[u8], pos: &mut usize) -> String {
+    let start = *pos;
+    while *pos < buf.len() && buf[*pos] != 0 {
+        *pos += 1;
+    }
+    let s = String::from_utf8_lossy(&buf[start..*pos]).to_string();
+    if *pos < buf.len() {
+        *pos += 1;
+    }
+    s
+}
+
 async fn a2s_players(addr: SocketAddrV4) -> Vec<PlayerOut> {
     let sock = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,

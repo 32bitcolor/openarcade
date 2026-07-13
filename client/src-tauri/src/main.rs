@@ -9,16 +9,24 @@ struct Ping {
     service: &'static str,
 }
 
-/// Placeholder command so the JS side has something to invoke while the real
-/// query/launch commands are built out in later phases.
 #[tauri::command]
 fn ping() -> Ping {
     Ping { ok: true, service: "openarcade-client" }
 }
 
+/// Launch-and-join: spawn a program with args (the game, or a URL opener).
+#[tauri::command]
+fn launch(program: String, args: Vec<String>) -> Result<(), String> {
+    std::process::Command::new(&program)
+        .args(&args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("{program}: {e}"))
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping])
+        .invoke_handler(tauri::generate_handler![ping, launch])
         .run(tauri::generate_context!())
         .expect("error while running OpenArcade");
 }
