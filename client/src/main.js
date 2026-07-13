@@ -1,13 +1,19 @@
 // OpenArcade desktop client — faithful GameSpy Arcade loop:
 // pick a game -> enter its room -> live server browser + chat lobby + member list.
+// Parlor games (chess/checkers/reversi) enter the same room shell with a board
+// in place of the server browser.
+
+import { PARLOR_GAMES, createParlorSession } from "./parlor.js";
 
 const API = localStorage.getItem("oa_api") || "http://10.0.1.44:8080";
 const WS_URL = API.replace(/^http/, "ws") + "/ws";
 
 const state = {
   games: [],
-  current: null, // gamename
+  current: null, // gamename or parlor:<key>
   room: null, // room channel for current game
+  mode: "server", // "server" | "parlor"
+  parlor: null, // active parlor session
   servers: [],
   members: [],
   nick: "guest",
@@ -78,6 +84,18 @@ function renderRail() {
     addGroup(list, "More games");
     empty.forEach(addRow);
   }
+  // Parlor games — the classic hosted casual games.
+  addGroup(list, "Parlor Games");
+  PARLOR_GAMES.forEach((p) => {
+    const id = `parlor:${p.key}`;
+    const row = document.createElement("div");
+    row.className = "game-row" + (id === state.current ? " sel" : "");
+    row.innerHTML = `<span class="ico" style="background:#7a4fd0">♟</span>
+      <span class="name">${escapeHtml(p.title)}</span>
+      <span class="count">${p.ready ? "" : "soon"}</span>`;
+    row.addEventListener("click", () => selectGame(id));
+    list.appendChild(row);
+  });
 }
 
 function addGroup(list, label) {
@@ -90,28 +108,61 @@ function addGroup(list, label) {
 // ---------------------------------------------------------------------------
 // Room view
 // ---------------------------------------------------------------------------
-function selectGame(gamename) {
-  const g = state.games.find((x) => x.gamename === gamename);
-  if (!g) return;
-  // leave previous room
+function leaveCurrent() {
   if (state.room) wsSend({ type: "leave", room: state.room });
+  if (state.parlor) { state.parlor.destroy(); state.parlor = null; }
+}
 
-  state.current = gamename;
-  state.room = `game-${gamename}`;
+function enterRoomShell(title, sub) {
   state.servers = [];
   state.members = [];
   renderRail();
-
   $("home").classList.add("hidden");
   $("room").classList.remove("hidden");
-  $("room-title").textContent = g.title;
-  $("room-sub").textContent = `${g.source} · room #${state.room}`;
+  $("room-title").textContent = title;
+  $("room-sub").textContent = sub;
   $("chatlog").innerHTML = "";
   $("memberlist").innerHTML = "";
+}
+
+function selectGame(id) {
+  if (id.startsWith("parlor:")) return enterParlor(id.slice(7));
+
+  const g = state.games.find((x) => x.gamename === id);
+  if (!g) return;
+  leaveCurrent();
+
+  state.mode = "server";
+  state.current = id;
+  state.room = `game-${id}`;
+  $("parlorwrap").classList.add("hidden");
+  $("browserwrap").classList.remove("hidden");
+  enterRoomShell(g.title, `${g.source} · room #${state.room}`);
   sysLine(`Entered the ${g.title} room.`);
 
   wsSend({ type: "join", room: state.room });
-  loadServers(gamename);
+  loadServers(id);
+}
+
+function enterParlor(key) {
+  const p = PARLOR_GAMES.find((x) => x.key === key);
+  if (!p) return;
+  leaveCurrent();
+
+  state.mode = "parlor";
+  state.current = `parlor:${key}`;
+  state.room = `parlor-${key}`;
+  $("browserwrap").classList.add("hidden");
+  $("parlorwrap").classList.remove("hidden");
+  enterRoomShell(p.title, `parlor game · room #${state.room}`);
+  sysLine(`Sat down at ${p.title}. Take a seat to play.`);
+
+  wsSend({ type: "join", room: state.room });
+  const send = (payload) => wsSend({ type: "game", room: state.room, g: payload });
+  state.parlor = createParlorSession(key, $("parlorboard"), $("parlor-controls"), {
+    send,
+    getNick: () => state.nick,
+  });
 }
 
 async function loadServers(gamename) {
@@ -231,6 +282,8 @@ function onWs(m) {
       if (m.room === state.room) sysLine(`${m.nick} left.`); break;
     case "chat":
       if (m.room === state.room) chatLine(m.nick, m.text); break;
+    case "game":
+      if (state.parlor && m.room === state.room) state.parlor.handle(m.g, m.nick); break;
   }
 }
 

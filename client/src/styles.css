@@ -144,6 +144,26 @@ tr.sel .col-addr { color: #dbe7fb; }
 
 .hidden { display: none !important; }
 
+/* ---- parlor games ---- */
+#parlorwrap { flex: 1 1 60%; display: flex; flex-direction: column; min-height: 0; margin: 6px; overflow: auto; }
+#parlor-controls { padding: 6px 8px; background: var(--chrome); }
+.parlor-status { font-weight: 700; font-size: 13px; color: var(--accent); margin-bottom: 4px; }
+.parlor-seats { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 12px; }
+.parlor-seats .parlor-score { font-family: var(--mono); color: var(--ink2); }
+.minibtn { margin-left: 4px; padding: 1px 7px; cursor: pointer; }
+.parlor-soon { padding: 40px; text-align: center; color: var(--ink2); }
+#parlorboard { display: grid; place-items: center; padding: 10px; }
+
+.reversi { display: grid; grid-template-columns: repeat(8, 44px); grid-template-rows: repeat(8, 44px); gap: 2px; background: #1f6f43; padding: 6px; border: 3px solid #0d3f26; }
+.reversi .cell { background: #2e9c63; display: grid; place-items: center; cursor: default; }
+.reversi .cell.legal { cursor: pointer; box-shadow: inset 0 0 0 2px rgba(255,255,255,.55); }
+.reversi .cell.legal:hover { background: #37b473; }
+.reversi .disc { width: 34px; height: 34px; border-radius: 50%; box-shadow: 0 1px 2px rgba(0,0,0,.4); }
+.reversi .disc.black { background: radial-gradient(circle at 35% 30%, #555, #000); }
+.reversi .disc.white { background: radial-gradient(circle at 35% 30%, #fff, #cfcfcf); }
+.seat.b b { color: #111; }
+.seat.w b { color: #666; }
+
 /* scrollbars a touch retro */
 ::-webkit-scrollbar { width: 16px; height: 16px; }
 ::-webkit-scrollbar-track { background: var(--chrome); }
