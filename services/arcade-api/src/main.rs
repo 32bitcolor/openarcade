@@ -25,7 +25,7 @@ use tokio::time::timeout;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     http::StatusCode,
     response::IntoResponse,
@@ -120,6 +120,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/games", get(games))
         .route("/servers/:gamename", get(servers))
+        .route("/details", get(details))
         .route("/ws", get(ws_upgrade))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -783,6 +784,201 @@ async fn poll_openspy(state: &AppState) -> Result<(), Box<dyn std::error::Error 
         tracing::info!("{gamename}: {} servers (openspy)", serv.len());
     }
     Ok(())
+}
+
+// ===========================================================================
+// Per-server player queries — for the "server details" panel.
+// Valve A2S_PLAYER yields each player's connection time; GameSpy/Quake give
+// name + score + ping.
+// ===========================================================================
+#[derive(Serialize)]
+struct PlayerOut {
+    name: String,
+    score: Option<i64>,
+    ping: Option<i64>,
+    time: Option<f64>, // seconds connected (Valve only)
+}
+
+async fn a2s_players(addr: SocketAddrV4) -> Vec<PlayerOut> {
+    let sock = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    if sock.connect(addr).await.is_err() {
+        return vec![];
+    }
+    let mut req: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x55, 0xFF, 0xFF, 0xFF, 0xFF];
+    let mut buf = [0u8; 8192];
+    for _ in 0..2 {
+        if sock.send(&req).await.is_err() {
+            return vec![];
+        }
+        let n = match timeout(Duration::from_secs(1), sock.recv(&mut buf)).await {
+            Ok(Ok(n)) => n,
+            _ => return vec![],
+        };
+        if n < 5 {
+            return vec![];
+        }
+        match buf[4] {
+            0x41 if n >= 9 => {
+                req = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x55];
+                req.extend_from_slice(&buf[5..9]);
+            }
+            0x44 => {
+                let mut out = Vec::new();
+                let count = buf[5] as usize;
+                let mut pos = 6;
+                for _ in 0..count {
+                    if pos >= n {
+                        break;
+                    }
+                    pos += 1; // index byte
+                    let name = read_cstr(&buf[..n], &mut pos);
+                    if pos + 8 > n {
+                        break;
+                    }
+                    let score = i32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as i64;
+                    pos += 4;
+                    let dur = f32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as f64;
+                    pos += 4;
+                    out.push(PlayerOut { name: clean(Some(name)).unwrap_or_default(), score: Some(score), ping: None, time: Some(dur) });
+                }
+                return out;
+            }
+            _ => return vec![],
+        }
+    }
+    vec![]
+}
+
+async fn gs_players(addr: SocketAddrV4) -> Vec<PlayerOut> {
+    let sock = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    if sock.connect(addr).await.is_err() || sock.send(b"\\status\\").await.is_err() {
+        return vec![];
+    }
+    let mut buf = [0u8; 16384];
+    let n = match timeout(Duration::from_secs(1), sock.recv(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        _ => return vec![],
+    };
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let body = text.split("\\final\\").next().unwrap_or(&text);
+    let parts: Vec<&str> = body.trim_start_matches('\\').split('\\').collect();
+    let mut kv = HashMap::new();
+    let mut it = parts.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        kv.insert(k.to_string(), v.to_string());
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        let name = kv.get(&format!("player_{i}")).or_else(|| kv.get(&format!("playername_{i}")));
+        match name {
+            Some(nm) if !nm.is_empty() => {
+                let score = kv.get(&format!("score_{i}")).or_else(|| kv.get(&format!("frags_{i}"))).and_then(|s| s.parse().ok());
+                let ping = kv.get(&format!("ping_{i}")).and_then(|s| s.parse().ok());
+                out.push(PlayerOut { name: clean(Some(nm.clone())).unwrap_or_default(), score, ping, time: None });
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+async fn quake_query(addr: SocketAddrV4, req: &[u8]) -> Option<String> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    sock.connect(addr).await.ok()?;
+    sock.send(req).await.ok()?;
+    let mut buf = [0u8; 16384];
+    let n = timeout(Duration::from_secs(1), sock.recv(&mut buf)).await.ok()?.ok()?;
+    Some(String::from_utf8_lossy(&buf[..n]).to_string())
+}
+
+fn parse_quake_players(text: &str, header: &str) -> Vec<PlayerOut> {
+    let idx = match text.find(header) {
+        Some(i) => i,
+        None => return vec![],
+    };
+    let rest = text[idx + header.len()..].trim_start_matches(['\n', '\r']);
+    let mut out = Vec::new();
+    for line in rest.split('\n').skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let (Some(a), Some(b)) = (line.find('"'), line.rfind('"')) {
+            if b > a {
+                let name = line[a + 1..b].to_string();
+                let nums: Vec<&str> = line[..a].split_whitespace().collect();
+                out.push(PlayerOut {
+                    name: clean(Some(name)).unwrap_or_default(),
+                    score: nums.first().and_then(|s| s.parse().ok()),
+                    ping: nums.get(1).and_then(|s| s.parse().ok()),
+                    time: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+async fn q3_players(addr: SocketAddrV4) -> Vec<PlayerOut> {
+    match quake_query(addr, b"\xff\xff\xff\xffgetstatus\0").await {
+        Some(t) => parse_quake_players(&t, "statusResponse"),
+        None => vec![],
+    }
+}
+async fn q2_players(addr: SocketAddrV4) -> Vec<PlayerOut> {
+    match quake_query(addr, b"\xff\xff\xff\xffstatus\0").await {
+        Some(t) => parse_quake_players(&t, "print"),
+        None => vec![],
+    }
+}
+
+#[derive(Deserialize)]
+struct DetailQuery {
+    game: String,
+    addr: String,
+    port: u16,
+}
+
+async fn details(State(state): State<AppState>, Query(q): Query<DetailQuery>) -> impl IntoResponse {
+    let ip: std::net::Ipv4Addr = match q.addr.parse() {
+        Ok(ip) => ip,
+        Err(_) => return (StatusCode::BAD_REQUEST, "bad addr").into_response(),
+    };
+    let sa = SocketAddrV4::new(ip, q.port);
+    let client = match state.pool.get().await {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let proto: String = match client
+        .query_opt("SELECT query_proto FROM games WHERE gamename = $1", &[&q.game])
+        .await
+    {
+        Ok(Some(r)) => r.get(0),
+        _ => "gamespy".to_string(),
+    };
+    let players = match proto.as_str() {
+        "valve" => a2s_players(sa).await,
+        "quake3" => q3_players(sa).await,
+        "quake" | "quake2" => q2_players(sa).await,
+        "333networks" => {
+            // UT-family: GameSpy query lives on the query port (game port + 1).
+            let mut p = gs_players(SocketAddrV4::new(ip, q.port + 1)).await;
+            if p.is_empty() {
+                p = gs_players(sa).await;
+            }
+            p
+        }
+        _ => gs_players(sa).await, // openspy / gamespy
+    };
+    Json(json!({ "game": q.game, "addr": q.addr, "port": q.port, "players": players })).into_response()
 }
 
 // ===========================================================================
