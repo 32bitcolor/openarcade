@@ -13,7 +13,7 @@
 //!   GET  /ws                  -> client live channel (rooms/chat/members/moves)
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,7 @@ use tokio::time::timeout;
 
 use axum::{
     extract::{
+        connect_info::ConnectInfo,
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
@@ -127,7 +128,9 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind arcade-api");
     tracing::info!("arcade-api listening on {addr}, polling every {poll_secs}s");
-    axum::serve(listener, app).await.expect("serve arcade-api");
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+        .expect("serve arcade-api");
 }
 
 // ===========================================================================
@@ -1009,6 +1012,20 @@ struct Conn {
     nick: String,
     tx: mpsc::UnboundedSender<String>,
     rooms: HashSet<String>,
+    remote_ip: String,
+}
+
+// A GameSpy-style staging room for peer-hosted games (e.g. AvP 2000): a host
+// creates it, players join, the host sets params and launches; everyone boots
+// into the host's session.
+#[derive(Clone)]
+struct StagingRoom {
+    id: String,
+    game: String,
+    host: String,
+    host_ip: String,
+    params: Value,
+    members: Vec<(String, bool)>, // (nick, ready)
 }
 
 #[derive(Default)]
@@ -1016,6 +1033,7 @@ struct Hub {
     conns: HashMap<u64, Conn>,
     rooms: HashMap<String, HashSet<u64>>,
     poker: HashMap<String, poker::Table>,
+    lobbies: HashMap<String, StagingRoom>,
 }
 
 impl Hub {
@@ -1073,17 +1091,75 @@ impl Hub {
             .to_string();
         self.broadcast(room, &msg);
     }
+
+    // --- staging rooms (peer-hosted games) ---
+    fn push_lobby_state(&self, id: &str) {
+        if let Some(sr) = self.lobbies.get(id) {
+            let members: Vec<Value> =
+                sr.members.iter().map(|(n, r)| json!({ "nick": n, "ready": r })).collect();
+            let msg = json!({
+                "type": "lobby", "ev": "state", "id": sr.id, "game": sr.game,
+                "host": sr.host, "hostIp": sr.host_ip, "params": sr.params, "members": members,
+            })
+            .to_string();
+            self.broadcast(id, &msg);
+        }
+    }
+    fn broadcast_lobby_list(&self, game: &str) {
+        let rooms: Vec<Value> = self
+            .lobbies
+            .values()
+            .filter(|s| s.game == game)
+            .map(|s| json!({ "id": s.id, "host": s.host, "params": s.params, "count": s.members.len() }))
+            .collect();
+        let msg = json!({ "type": "lobby", "ev": "list", "game": game, "rooms": rooms }).to_string();
+        self.broadcast(&format!("game-{game}"), &msg);
+    }
+    fn leave_lobby(&mut self, conn_id: u64, nick: &str, id: &str) {
+        let (game, disband) = match self.lobbies.get_mut(id) {
+            Some(sr) => {
+                let g = sr.game.clone();
+                if sr.host == nick {
+                    (Some(g), true)
+                } else {
+                    sr.members.retain(|(n, _)| n != nick);
+                    (Some(g), false)
+                }
+            }
+            None => (None, false),
+        };
+        if let Some(s) = self.rooms.get_mut(id) {
+            s.remove(&conn_id);
+        }
+        if let Some(c) = self.conns.get_mut(&conn_id) {
+            c.rooms.remove(id);
+        }
+        if disband {
+            self.broadcast(id, &json!({ "type": "lobby", "ev": "disbanded", "id": id }).to_string());
+            self.lobbies.remove(id);
+        } else {
+            self.push_lobby_state(id);
+        }
+        if let Some(g) = game {
+            self.broadcast_lobby_list(&g);
+        }
+    }
 }
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    let ip = addr.ip().to_string();
+    ws.on_upgrade(move |socket| handle_socket(socket, state, ip))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, remote_ip: String) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
@@ -1100,7 +1176,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     {
         let mut hub = state.hub.lock().unwrap();
-        hub.conns.insert(id, Conn { nick: nick.clone(), tx: tx.clone(), rooms: HashSet::new() });
+        hub.conns.insert(id, Conn { nick: nick.clone(), tx: tx.clone(), rooms: HashSet::new(), remote_ip });
     }
     let _ = tx.send(json!({ "type": "welcome", "nick": nick, "service": "arcade-api" }).to_string());
 
@@ -1217,6 +1293,98 @@ fn handle_client_msg(state: &AppState, id: u64, text: &str) {
                 }
             }
         }
+        // Staging rooms for peer-hosted games (AvP 2000, etc.).
+        "lobby" => {
+            let doo = v.get("do").and_then(|x| x.as_str()).unwrap_or("");
+            let nick = hub.nick_of(id);
+            match doo {
+                "host" => {
+                    let game = v.get("game").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if !game.is_empty() {
+                        let n = state.next_id.fetch_add(1, Ordering::Relaxed);
+                        let rid = format!("stage-{game}-{n}");
+                        let host_ip = hub.conns.get(&id).map(|c| c.remote_ip.clone()).unwrap_or_default();
+                        let params = v.get("params").cloned().unwrap_or_else(|| json!({}));
+                        hub.lobbies.insert(rid.clone(), StagingRoom {
+                            id: rid.clone(), game: game.clone(), host: nick.clone(),
+                            host_ip, params, members: vec![(nick.clone(), false)],
+                        });
+                        hub.rooms.entry(rid.clone()).or_default().insert(id);
+                        if let Some(c) = hub.conns.get_mut(&id) { c.rooms.insert(rid.clone()); }
+                        hub.send_to(id, &json!({ "type": "lobby", "ev": "created", "id": rid }).to_string());
+                        hub.push_lobby_state(&rid);
+                        hub.broadcast_lobby_list(&game);
+                    }
+                }
+                "join" => {
+                    if let Some(rid) = v.get("id").and_then(|x| x.as_str()) {
+                        let game = hub.lobbies.get(rid).map(|s| s.game.clone());
+                        if let Some(sr) = hub.lobbies.get_mut(rid) {
+                            if !sr.members.iter().any(|(nm, _)| nm == &nick) {
+                                sr.members.push((nick.clone(), false));
+                            }
+                        }
+                        hub.rooms.entry(rid.to_string()).or_default().insert(id);
+                        if let Some(c) = hub.conns.get_mut(&id) { c.rooms.insert(rid.to_string()); }
+                        hub.push_lobby_state(rid);
+                        if let Some(g) = game { hub.broadcast_lobby_list(&g); }
+                    }
+                }
+                "leave" => {
+                    if let Some(rid) = v.get("id").and_then(|x| x.as_str()) {
+                        hub.leave_lobby(id, &nick, rid);
+                    }
+                }
+                "ready" => {
+                    if let Some(rid) = v.get("id").and_then(|x| x.as_str()) {
+                        let ready = v.get("ready").and_then(|x| x.as_bool()).unwrap_or(false);
+                        if let Some(sr) = hub.lobbies.get_mut(rid) {
+                            for m in sr.members.iter_mut() {
+                                if m.0 == nick { m.1 = ready; }
+                            }
+                        }
+                        hub.push_lobby_state(rid);
+                    }
+                }
+                "params" => {
+                    if let (Some(rid), Some(p)) =
+                        (v.get("id").and_then(|x| x.as_str()), v.get("params").cloned())
+                    {
+                        let is_host = hub.lobbies.get(rid).map(|s| s.host == nick).unwrap_or(false);
+                        if is_host {
+                            if let Some(sr) = hub.lobbies.get_mut(rid) { sr.params = p; }
+                            hub.push_lobby_state(rid);
+                        }
+                    }
+                }
+                "launch" => {
+                    if let Some(rid) = v.get("id").and_then(|x| x.as_str()) {
+                        if let Some(sr) = hub.lobbies.get(rid) {
+                            if sr.host == nick {
+                                let msg = json!({
+                                    "type": "lobby", "ev": "launch", "id": rid,
+                                    "host": sr.host, "hostIp": sr.host_ip, "params": sr.params,
+                                })
+                                .to_string();
+                                hub.broadcast(rid, &msg);
+                            }
+                        }
+                    }
+                }
+                "list" => {
+                    if let Some(game) = v.get("game").and_then(|x| x.as_str()) {
+                        let rooms: Vec<Value> = hub
+                            .lobbies
+                            .values()
+                            .filter(|s| s.game == game)
+                            .map(|s| json!({ "id": s.id, "host": s.host, "params": s.params, "count": s.members.len() }))
+                            .collect();
+                        hub.send_to(id, &json!({ "type": "lobby", "ev": "list", "game": game, "rooms": rooms }).to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
         _ => {}
     }
 }
@@ -1239,6 +1407,8 @@ fn on_disconnect(state: &AppState, id: u64) {
             if hub.poker.get(r).map(|t| t.is_empty()).unwrap_or(false) {
                 hub.poker.remove(r);
             }
+        } else if r.starts_with("stage-") {
+            hub.leave_lobby(id, &nick, r);
         }
     }
     for r in rooms {
