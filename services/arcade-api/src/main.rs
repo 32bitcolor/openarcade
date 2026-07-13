@@ -40,6 +40,8 @@ use tokio::sync::mpsc;
 use tokio_postgres::NoTls;
 use tower_http::cors::CorsLayer;
 
+mod poker;
+
 const STALE_MINUTES: i64 = 10;
 
 #[derive(Clone)]
@@ -801,6 +803,32 @@ struct Conn {
 struct Hub {
     conns: HashMap<u64, Conn>,
     rooms: HashMap<String, HashSet<u64>>,
+    poker: HashMap<String, poker::Table>,
+}
+
+impl Hub {
+    /// Deliver poker engine output: broadcast to the room, or private to a nick.
+    fn deliver_poker(&self, room: &str, outs: Vec<poker::Out>) {
+        for o in outs {
+            let mut m = o.msg;
+            if let Some(obj) = m.as_object_mut() {
+                obj.insert("type".into(), json!("poker"));
+                obj.insert("room".into(), json!(room));
+            }
+            let s = m.to_string();
+            match o.to {
+                None => self.broadcast(room, &s),
+                Some(target) => {
+                    for (id, c) in &self.conns {
+                        if c.nick == target {
+                            let _ = c.tx.send(s.clone());
+                            let _ = id;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Hub {
@@ -961,6 +989,22 @@ fn handle_client_msg(state: &AppState, id: u64, text: &str) {
                 hub.broadcast(&room, &out.to_string());
             }
         }
+        // Poker — server-authoritative table (private hole cards).
+        "poker" => {
+            if let Some(room) = room {
+                if room.starts_with("parlor-poker") {
+                    let nick = hub.nick_of(id);
+                    let outs = {
+                        let table = hub.poker.entry(room.clone()).or_insert_with(poker::Table::new);
+                        table.handle(&nick, &v)
+                    };
+                    hub.deliver_poker(&room, outs);
+                    if hub.poker.get(&room).map(|t| t.is_empty()).unwrap_or(false) {
+                        hub.poker.remove(&room);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -974,6 +1018,15 @@ fn on_disconnect(state: &AppState, id: u64) {
     for r in &rooms {
         if let Some(s) = hub.rooms.get_mut(r) {
             s.remove(&id);
+        }
+    }
+    for r in &rooms {
+        if r.starts_with("parlor-poker") {
+            let outs = hub.poker.get_mut(r).map(|t| t.handle(&nick, &json!({ "do": "leave" }))).unwrap_or_default();
+            hub.deliver_poker(r, outs);
+            if hub.poker.get(r).map(|t| t.is_empty()).unwrap_or(false) {
+                hub.poker.remove(r);
+            }
         }
     }
     for r in rooms {

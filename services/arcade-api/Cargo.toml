@@ -20,3 +20,4 @@ tokio-postgres = "0.7"
 deadpool-postgres = "0.14"
 redis = { version = "0.27", features = ["tokio-comp", "aio"] }
 futures = "0.3"
+rand = "0.8"
