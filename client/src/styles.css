@@ -164,6 +164,17 @@ tr.sel .col-addr { color: #dbe7fb; }
 .seat.b b { color: #111; }
 .seat.w b { color: #666; }
 
+.checkers { display: grid; grid-template-columns: repeat(8, 46px); grid-template-rows: repeat(8, 46px); border: 3px solid #5a3a1a; }
+.checkers .csq { display: grid; place-items: center; }
+.checkers .csq.light { background: #e8d3a8; }
+.checkers .csq.dark { background: #9c6a3c; cursor: pointer; }
+.checkers .csq.tgt { box-shadow: inset 0 0 0 3px rgba(60,180,90,.85); cursor: pointer; }
+.checkers .csq.selp { box-shadow: inset 0 0 0 3px rgba(255,215,0,.9); }
+.checkers .cpiece { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: 18px; color: #ffd257; box-shadow: 0 2px 3px rgba(0,0,0,.45); }
+.checkers .cpiece.black { background: radial-gradient(circle at 36% 30%, #4a4a4a, #111); }
+.checkers .cpiece.white { background: radial-gradient(circle at 36% 30%, #fff, #c8c8c8); color: #b8860b; }
+.checkers .cpiece.king { box-shadow: 0 0 0 2px #ffd257, 0 2px 3px rgba(0,0,0,.45); }
+
 /* scrollbars a touch retro */
 ::-webkit-scrollbar { width: 16px; height: 16px; }
 ::-webkit-scrollbar-track { background: var(--chrome); }
