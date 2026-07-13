@@ -610,9 +610,11 @@ async fn poll_quake2(
     game_id: i32,
     gamename: &str,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    // NOTE: q2servers.com's HTTPS cert is expired — use plain HTTP (it doesn't
+    // redirect) so the fetch doesn't fail cert verification.
     let text = state
         .http
-        .get("https://q2servers.com/?raw=1")
+        .get("http://q2servers.com/?raw=1")
         .timeout(Duration::from_secs(20))
         .send()
         .await?
