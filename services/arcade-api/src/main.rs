@@ -106,6 +106,9 @@ async fn main() {
                 if let Err(e) = poll_quake(&state).await {
                     tracing::warn!("quake poll failed: {e}");
                 }
+                if let Err(e) = poll_openspy(&state).await {
+                    tracing::warn!("openspy poll failed: {e}");
+                }
                 tokio::time::sleep(Duration::from_secs(poll_secs)).await;
             }
         });
@@ -142,10 +145,10 @@ async fn seed_games(state: &AppState) -> Result<(), Box<dyn std::error::Error + 
         ("bfield1942", "Battlefield 1942", "openspy"),
         ("bfvietnam", "Battlefield Vietnam", "openspy"),
         ("battlefield2", "Battlefield 2", "openspy"),
-        ("halom", "Halo: Combat Evolved", "openspy"),
+        ("halo", "Halo: Combat Evolved", "openspy"),
         ("swat4", "SWAT 4", "openspy"),
         ("nwn", "Neverwinter Nights", "openspy"),
-        ("avpclassic", "Aliens versus Predator Classic 2000", "openspy"),
+        ("avp", "Aliens versus Predator Classic 2000", "openspy"),
         ("cstrike", "Counter-Strike 1.6", "valve"),
         ("tfc", "Team Fortress Classic", "valve"),
         ("dod", "Day of Defeat", "valve"),
@@ -682,6 +685,98 @@ async fn poll_quake(state: &AppState) -> Result<(), Box<dyn std::error::Error + 
             Ok(n) => tracing::info!("{gamename}: {n} servers ({proto})"),
             Err(e) => tracing::warn!("{gamename} ({proto}) failed: {e}"),
         }
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// OpenSpy ingester — gslist gets the list from master.openspy.net (encrypted
+// SB protocol, per-game secret keys via gslist.cfg); then a GameSpy \status\
+// query per server for live details. Covers SWAT 4, the Battlefields, AvP, etc.
+// ===========================================================================
+async fn gs_status(addr: SocketAddrV4) -> Option<A2sInfo> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    sock.connect(addr).await.ok()?;
+    sock.send(b"\\status\\").await.ok()?;
+    let mut buf = [0u8; 16384];
+    let n = timeout(Duration::from_secs(1), sock.recv(&mut buf)).await.ok()?.ok()?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let body = text.split("\\final\\").next().unwrap_or(&text);
+    let parts: Vec<&str> = body.trim_start_matches('\\').split('\\').collect();
+    let mut kv = HashMap::new();
+    let mut it = parts.into_iter();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        kv.insert(k.to_string(), v.to_string());
+    }
+    kv.get("hostname")?;
+    Some(A2sInfo {
+        name: kv.get("hostname").cloned(),
+        map: kv.get("mapname").cloned(),
+        players: kv.get("numplayers").and_then(|s| s.parse::<i32>().ok()),
+        max: kv.get("maxplayers").and_then(|s| s.parse::<i32>().ok()),
+    })
+}
+
+async fn poll_openspy(state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let gslist_dir = std::env::var("GSLIST_DIR").unwrap_or_else(|_| "/opt/gslist".into());
+    let gslist_bin = format!("{gslist_dir}/gslist");
+    if !std::path::Path::new(&gslist_bin).exists() {
+        tracing::debug!("gslist not found at {gslist_bin} — skipping openspy games");
+        return Ok(());
+    }
+    let client = state.pool.get().await?;
+    let rows = client
+        .query("SELECT id, gamename FROM games WHERE query_proto = 'openspy' AND supported", &[])
+        .await?;
+
+    for row in rows {
+        let game_id: i32 = row.get(0);
+        let gamename: String = row.get(1);
+        let output = tokio::process::Command::new(&gslist_bin)
+            .args(["-n", &gamename, "-x", "master.openspy.net"])
+            .current_dir(&gslist_dir)
+            .output()
+            .await;
+        let out = match output {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!("gslist {gamename}: {e}");
+                continue;
+            }
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let addrs: Vec<SocketAddrV4> = text
+            .lines()
+            .filter_map(|l| {
+                let p: Vec<&str> = l.split_whitespace().collect();
+                if p.len() == 2 {
+                    format!("{}:{}", p[0], p[1]).parse().ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let details = futures::stream::iter(addrs.into_iter().map(|sa| async move { (sa, gs_status(sa).await) }))
+            .buffer_unordered(64)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut serv: Vec<ServerOut> = Vec::new();
+        for (sa, d) in details {
+            let info = match d {
+                Some(i) if i.name.is_some() => i,
+                _ => continue,
+            };
+            let ip = IpAddr::V4(*sa.ip());
+            let port = sa.port() as i32;
+            let name = clean(info.name);
+            let map = clean(info.map);
+            upsert_server(&client, game_id, ip, port, &name, &map, &None, info.players, info.max, "openspy").await?;
+            serv.push(ServerOut { address: sa.ip().to_string(), port, name, map, gametype: None, players: info.players, max_players: info.max, source: "openspy".into() });
+        }
+        cache_servers(state, &gamename, &serv).await?;
+        tracing::info!("{gamename}: {} servers (openspy)", serv.len());
     }
     Ok(())
 }

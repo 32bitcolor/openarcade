@@ -3,8 +3,10 @@
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+# gslist is a 32-bit i386 binary — enable multiarch + 32-bit libc.
+dpkg --add-architecture i386 || true
 apt-get update -qq
-apt-get install -y -qq build-essential pkg-config libssl-dev curl git ca-certificates cmake >/dev/null
+apt-get install -y -qq build-essential pkg-config libssl-dev curl git ca-certificates cmake libc6:i386 >/dev/null
 
 # Debian 12 ships rustc too old for axum 0.7 — use rustup stable.
 if ! command -v cargo >/dev/null 2>&1; then
@@ -19,6 +21,11 @@ if [ -d openarcade ]; then
 else
   git clone --depth 1 https://github.com/32bitcolor/openarcade.git
 fi
+
+# gslist (OpenSpy server-list tool) + its game-key database.
+mkdir -p /opt/gslist
+install -m755 /opt/openarcade/infra/tools/gslist/gslist /opt/gslist/gslist
+install -m644 /opt/openarcade/infra/tools/gslist/gslist.cfg /opt/gslist/gslist.cfg
 
 cd /opt/openarcade/services/arcade-api
 cargo build --release
@@ -36,6 +43,8 @@ POLL_INTERVAL_SECS=${POLL_INTERVAL_SECS:-120}
 # Optional: free key from https://steamcommunity.com/dev/apikey — lights up
 # the Valve games (CS 1.6 / TFC / DoD). Empty = those games stay dark.
 STEAM_API_KEY=${STEAM_API_KEY:-}
+# OpenSpy ingester: directory holding the gslist binary + gslist.cfg.
+GSLIST_DIR=/opt/gslist
 ENV
 fi
 
